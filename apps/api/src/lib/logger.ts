@@ -1,4 +1,7 @@
-import pino from "pino";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const pino = require("pino") as typeof import("pino").default;
 
 const isProduction = process.env.NODE_ENV === "production";
 
