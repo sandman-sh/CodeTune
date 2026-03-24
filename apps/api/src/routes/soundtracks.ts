@@ -9,6 +9,14 @@ import path from "path";
 
 const router = Router();
 
+type FetchResponseLike = {
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+  text: () => Promise<string>;
+  arrayBuffer: () => Promise<ArrayBuffer>;
+};
+
 // Disk-based audio cache — persists across server restarts
 const AUDIO_DIR = path.join(os.tmpdir(), "codetune-audio");
 const INSTRUMENTAL_AUDIO_PIPELINE_VERSION = "instrumental-v1";
@@ -152,7 +160,7 @@ async function fetchGitHubStats(repoName: string): Promise<GitHubStats> {
     hasWiki: false, defaultBranch: "main",
   };
   try {
-    const [repoRes, langRes] = await Promise.all([
+    const [repoResRaw, langResRaw] = await Promise.all([
       fetch(`https://api.github.com/repos/${repoName}`, {
         headers: { "User-Agent": "CodeTune/1.0", "Accept": "application/vnd.github.v3+json" },
         signal: AbortSignal.timeout(10000),
@@ -162,6 +170,8 @@ async function fetchGitHubStats(repoName: string): Promise<GitHubStats> {
         signal: AbortSignal.timeout(10000),
       }),
     ]);
+    const repoRes = repoResRaw as FetchResponseLike;
+    const langRes = langResRaw as FetchResponseLike;
     if (!repoRes.ok) return defaults;
     const repoData = (await repoRes.json()) as Partial<{
       stargazers_count: number;
@@ -856,7 +866,7 @@ async function generateSungMusicWithElevenMusic(
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) throw new Error("ELEVENLABS_API_KEY is not set");
 
-  const response = await fetch("https://api.elevenlabs.io/v1/music?output_format=mp3_44100_128", {
+  const response = (await fetch("https://api.elevenlabs.io/v1/music?output_format=mp3_44100_128", {
     method: "POST",
     headers: {
       "xi-api-key": apiKey,
@@ -869,7 +879,7 @@ async function generateSungMusicWithElevenMusic(
       respect_sections_durations: true,
     }),
     signal: AbortSignal.timeout(120000),
-  });
+  })) as FetchResponseLike;
 
   if (!response.ok) {
     const err = await response.text();
@@ -913,7 +923,7 @@ async function generateMusicWithElevenLabs(
   // ElevenLabs Sound Generation API — max 22 seconds per request
   const clampedDuration = Math.min(durationSeconds, 22);
 
-  const response = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
+  const response = (await fetch("https://api.elevenlabs.io/v1/sound-generation", {
     method: "POST",
     headers: {
       "xi-api-key": apiKey,
@@ -925,7 +935,7 @@ async function generateMusicWithElevenLabs(
       duration_seconds: clampedDuration,
       prompt_influence: promptInfluence,
     }),
-  });
+  })) as FetchResponseLike;
 
   if (!response.ok) {
     const err = await response.text();
@@ -936,7 +946,7 @@ async function generateMusicWithElevenLabs(
 
   // For "full" mode, generate a second segment and concatenate the buffers
   if (durationSeconds > 22) {
-    const response2 = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
+    const response2 = (await fetch("https://api.elevenlabs.io/v1/sound-generation", {
       method: "POST",
       headers: {
         "xi-api-key": apiKey,
@@ -948,7 +958,7 @@ async function generateMusicWithElevenLabs(
         duration_seconds: Math.min(durationSeconds - 22, 22),
         prompt_influence: 0.4,
       }),
-    });
+    })) as FetchResponseLike;
     if (response2.ok) {
       const buf2 = Buffer.from(await response2.arrayBuffer());
       return Buffer.concat([buf1, buf2]);
