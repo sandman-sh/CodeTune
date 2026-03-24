@@ -1,7 +1,20 @@
 import { createRequire } from "node:module";
 
+type LoggerLike = {
+  info: (obj: unknown, msg?: string) => void;
+  error: (obj: unknown, msg?: string) => void;
+  warn: (obj: unknown, msg?: string) => void;
+};
+
 const require = createRequire(import.meta.url);
-const pino = require("pino") as typeof import("pino").default;
+const pino = require("pino") as (options: {
+  level: string;
+  redact: string[];
+  transport?: {
+    target: string;
+    options: { colorize: boolean };
+  };
+}) => LoggerLike;
 
 const isProduction = process.env.NODE_ENV === "production";
 

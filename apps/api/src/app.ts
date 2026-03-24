@@ -1,14 +1,28 @@
 import { createRequire } from "node:module";
-import type { Express } from "express";
+import type { RequestHandler } from "express";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
 const require = createRequire(import.meta.url);
-const express = require("express") as typeof import("express").default;
-const cors = require("cors") as typeof import("cors").default;
-const pinoHttp = require("pino-http") as typeof import("pino-http").default;
+type ExpressModule = {
+  (): {
+    use: (...args: unknown[]) => void;
+  };
+  json: () => RequestHandler;
+  urlencoded: (options: { extended: boolean }) => RequestHandler;
+};
 
-const app: Express = express();
+const express = require("express") as ExpressModule;
+const cors = require("cors") as () => RequestHandler;
+const pinoHttp = require("pino-http") as (options: {
+  logger: typeof logger;
+  serializers: {
+    req: (req: { id?: string; method?: string; url?: string }) => { id?: string; method?: string; url?: string };
+    res: (res: { statusCode?: number }) => { statusCode?: number };
+  };
+}) => RequestHandler;
+
+const app = express();
 
 app.use(
   pinoHttp({
