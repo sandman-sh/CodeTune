@@ -468,25 +468,33 @@ async function scrapeRepoContext(repoUrl: string, repoName: string): Promise<str
 
 // ── Lyrics generation ──────────────────────────────────────────────────────
 
+const LYRIC_CONTEXT_NOISE_PATTERN = /skip to content|sign in|sign up|github|navigation menu|search code|open more actions menu|reload to refresh|dismiss alert|switched accounts/i;
+
 function generatePersonalizedLyrics(
   repo: string,
   owner: string,
   genre: string,
   tech: string[],
-  keyPhrases: string[]
+  keyPhrases: string[],
+  _metrics?: CodeMetrics,
+  _github?: GitHubStats,
 ): string {
   const techLine = tech.length > 0 ? tech.slice(0, 3).join(", ") : "lines of code";
+  const repoLabel = repo.replace(/[-_]+/g, " ").trim();
   const contextHint = keyPhrases.length > 0
     ? keyPhrases[0].replace(/[#*`]/g, "").trim().slice(0, 50)
     : `${repo} changing the game`;
+  const detailHint = keyPhrases.length > 1
+    ? keyPhrases[1].replace(/[#*`]/g, "").trim().slice(0, 50)
+    : `${owner} shaped ${repoLabel} with ${techLine}`;
 
   const lyrics: Record<string, string> = {
     rap: `[Verse 1]
-They said code cannot speak, I said watch me prove them wrong
-${repo} in the building, ${owner} been grinding all along
-${techLine} — that's the stack we running here
-Every commit a bar, every pull request crystal clear
+${repoLabel} on the screen and the signal feels strong
 ${contextHint}
+${techLine} — that's the stack we running here
+${techLine} in the mix, now the whole stack belongs
+${detailHint}
 Merge to main, no fear
 
 [Chorus]
@@ -512,9 +520,9 @@ That's ${repo} for life
 Built different, built right`,
 
     lofi: `[Verse 1]
-Late night, dim screen glow
-${repo} open, watch the cursor go
-${owner}'s vision in every line
+${repoLabel} glows beneath the screen light
+${contextHint}
+${owner}'s vision settles softly in the build tonight
 ${techLine} — the stars align
 
 [Chorus]
@@ -542,9 +550,9 @@ ${owner} and ${repo}
 Still building, still at ease`,
 
     cinematic: `[Verse 1]
-From a single commit, an empire was born
-${owner} with a vision, blazing a trail
-${repo} rising, through the night and dawn
+${repoLabel} steps out of the dark in full design
+${contextHint}
+${owner} pushed the vision past the warning signs
 Built with ${techLine} — beyond the veil
 
 [Chorus]
@@ -572,10 +580,10 @@ ${repo} still stands
 Ready for what's next`,
 
     indie: `[Verse 1]
-I found your repository on a Tuesday afternoon
+${repoLabel} landed softly in the middle of the day
 ${repo} — it felt like a brand new tune
-${owner} wrote it in ${techLine.split(",")[0] || "silence"}
-The kind of project that gets under your skin
+${owner} left the feeling tucked inside the frame
+${techLine.split(",")[0] || "silence"} carries it away
 
 [Chorus]
 But it's got a soundtrack now
@@ -617,7 +625,7 @@ async function generateLyrics(
 ): Promise<string> {
   const [owner, repo] = repoName.split("/");
   const tech = extractTechWords(context);
-  const noisyLinePattern = /skip to content|sign in|sign up|github|navigation menu|search code/i;
+  const noisyLinePattern = LYRIC_CONTEXT_NOISE_PATTERN;
   const lines = context
     .split("\n")
     .map((l) => l.trim())
@@ -657,7 +665,7 @@ async function generateLyrics(
     lines.push(...metricPhrases.slice(0, 3));
   }
 
-  return generatePersonalizedLyrics(repo || repoName, owner || "dev", genre, tech, lines);
+  return generatePersonalizedLyrics(repo || repoName, owner || "dev", genre, tech, lines, metrics, github);
 }
 
 // ── ElevenLabs Sound Generation — real music from code metrics ──────────────
