@@ -1,9 +1,7 @@
 import { Router } from "express";
-import { db } from "@codetune/database";
-import { soundtracksTable } from "@codetune/database";
-import { GenerateSoundtrackBody, CreateShareCardBody } from "@codetune/api-zod";
+import { and, db, eq, soundtracksTable } from "../../../../packages/database/src/index.js";
+import { CreateShareCardBody, GenerateSoundtrackBody } from "../../../../packages/api-zod/src/generated/api.js";
 import FirecrawlApp from "@mendable/firecrawl-js";
-import { eq, and } from "drizzle-orm";
 import { createHash } from "crypto";
 import { promises as fs } from "fs";
 import os from "os";
@@ -962,7 +960,7 @@ async function generateMusicWithElevenLabs(
 
 // ── Routes ─────────────────────────────────────────────────────────────────
 
-router.post("/generate", async (req, res) => {
+router.post("/generate", async (req: any, res: any) => {
   const parse = GenerateSoundtrackBody.safeParse(req.body);
   if (!parse.success) {
     res.status(400).json({ error: "VALIDATION_ERROR", message: "Invalid request body" });
@@ -1236,7 +1234,7 @@ router.post("/generate", async (req, res) => {
 });
 
 // Serve cached audio
-router.get("/audio/:id", (req, res) => {
+router.get("/audio/:id", (req: any, res: any) => {
   const id = parseInt(req.params.id, 10);
   const audio = audioCache.get(id);
   if (!audio) {
@@ -1252,7 +1250,7 @@ router.get("/audio/:id", (req, res) => {
   res.send(audio);
 });
 
-router.post("/share", async (req, res) => {
+router.post("/share", async (req: any, res: any) => {
   const parse = CreateShareCardBody.safeParse(req.body);
   if (!parse.success) {
     res.status(400).json({ error: "VALIDATION_ERROR", message: "Invalid request body" });

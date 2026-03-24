@@ -1,9 +1,10 @@
 import { drizzle } from "drizzle-orm/node-postgres";
+export { and, eq } from "drizzle-orm";
 import { existsSync, readFileSync } from "node:fs";
 import pg from "pg";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import * as schema from "./schema";
+import * as schema from "./schema/index.js";
 
 const { Pool } = pg;
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -46,4 +47,4 @@ export const pool = new Pool({
 });
 export const db = drizzle(pool, { schema });
 
-export * from "./schema";
+export * from "./schema/index.js";

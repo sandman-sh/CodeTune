@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 type ExpressModule = {
   (): {
     use: (...args: unknown[]) => void;
+    listen: (port: number, cb: (err?: unknown) => void) => void;
   };
   json: () => RequestHandler;
   urlencoded: (options: { extended: boolean }) => RequestHandler;
