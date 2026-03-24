@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import { Router } from "express";
 import { db } from "@codetune/database";
 import { soundtracksTable } from "@codetune/database";
 import { GenerateSoundtrackBody, CreateShareCardBody } from "@codetune/api-zod";
@@ -9,7 +9,7 @@ import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 
-const router: IRouter = Router();
+const router = Router();
 
 // Disk-based audio cache — persists across server restarts
 const AUDIO_DIR = path.join(os.tmpdir(), "codetune-audio");
