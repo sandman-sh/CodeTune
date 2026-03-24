@@ -1,0 +1,189 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: CodeTune API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: codetune
+    description: CodeTune music generation
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /codetune/generate:
+    post:
+      operationId: generateSoundtrack
+      tags: [codetune]
+      summary: Generate soundtrack from GitHub repo
+      description: Analyzes a GitHub repository and generates a music soundtrack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateRequest"
+      responses:
+        "200":
+          description: Soundtrack generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /codetune/share:
+    post:
+      operationId: createShareCard
+      tags: [codetune]
+      summary: Create a share card for a generated soundtrack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareCardRequest"
+      responses:
+        "200":
+          description: Share card created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareCardResponse"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    GenerateRequest:
+      type: object
+      properties:
+        repoUrl:
+          type: string
+          description: GitHub repository URL
+        mode:
+          type: string
+          enum: [lyrical, instrumental]
+          description: Generation mode
+        genre:
+          type: string
+          enum: [lofi, cinematic, indie, rap]
+          description: Music genre
+        generationType:
+          type: string
+          enum: [quick, full]
+          description: Quick (~26sec) or full (~1:20) track
+      required:
+        - repoUrl
+        - mode
+        - genre
+        - generationType
+    GenerateResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        repoUrl:
+          type: string
+        repoName:
+          type: string
+        mode:
+          type: string
+        genre:
+          type: string
+        generationType:
+          type: string
+        lyrics:
+          type: string
+          nullable: true
+        audioUrl:
+          type: string
+          nullable: true
+        duration:
+          type: number
+          nullable: true
+        createdAt:
+          type: string
+        cached:
+          type: boolean
+          nullable: true
+        musicParams:
+          type: object
+          nullable: true
+          additionalProperties: true
+        codeMetrics:
+          type: object
+          nullable: true
+          additionalProperties: true
+        audioError:
+          type: string
+          nullable: true
+      required:
+        - id
+        - repoUrl
+        - repoName
+        - mode
+        - genre
+        - generationType
+        - createdAt
+    ShareCardRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        repoName:
+          type: string
+        genre:
+          type: string
+      required:
+        - id
+        - repoName
+        - genre
+    ShareCardResponse:
+      type: object
+      properties:
+        shareUrl:
+          type: string
+        shareText:
+          type: string
+      required:
+        - shareUrl
+        - shareText
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+      required:
+        - error
+        - message
