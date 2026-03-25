@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence, useMotionValue, useSpring, type Variants } from "framer-motion";
 import { Music, Code2, Sparkles, Download, Share2, RotateCcw, ExternalLink, Headphones, Film, Guitar, Mic, ChevronRight, Swords } from "lucide-react";
+import { Link } from "wouter";
 import { cn } from "@/lib/utils";
+import { AppModeSwitch } from "@/components/AppModeSwitch";
 import { AudioPlayer } from "@/components/AudioPlayer";
 import { ShareDialog } from "@/components/ShareDialog";
 import { CodeDNA, type MusicParamsData, type CodeMetricsData } from "@/components/CodeDNA";
@@ -203,29 +205,33 @@ export default function Home() {
         transition={{ duration: 0.4, ease: "easeOut" }}
         className="fixed top-0 inset-x-0 z-50 h-14 flex items-center justify-between px-6 border-b border-border bg-background/80 backdrop-blur-xl"
       >
-        <motion.div
-          className="flex items-center gap-2.5 cursor-pointer"
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.97 }}
-          onClick={result || isPending ? handleReset : undefined}
-        >
-          <motion.div
-            className="w-7 h-7 rounded-lg bg-foreground flex items-center justify-center"
-            animate={isPending ? { rotate: [0, 360] } : { rotate: 0 }}
-            transition={{ duration: 2, repeat: isPending ? Infinity : 0, ease: "linear" }}
-          >
-            <Music className="w-3.5 h-3.5 text-background" />
-          </motion.div>
-          <span className="font-semibold text-base tracking-tight">CodeTune</span>
-        </motion.div>
+        <Link href="/">
+          <a onClick={result || isPending ? handleReset : undefined}>
+            <motion.div
+              className="flex items-center gap-2.5 cursor-pointer"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.97 }}
+            >
+              <motion.div
+                className="w-7 h-7 rounded-lg bg-foreground flex items-center justify-center"
+                animate={isPending ? { rotate: [0, 360] } : { rotate: 0 }}
+                transition={{ duration: 2, repeat: isPending ? Infinity : 0, ease: "linear" }}
+              >
+                <Music className="w-3.5 h-3.5 text-background" />
+              </motion.div>
+              <span className="font-semibold text-base tracking-tight">CodeTune</span>
+            </motion.div>
+          </a>
+        </Link>
 
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.3 }}
-          className="flex items-center gap-5 text-xs text-muted-foreground pr-11"
+          className="flex items-center gap-4 text-xs text-muted-foreground pr-11"
         >
-          <span className="hidden sm:block">Powered by Firecrawl &amp; ElevenLabs</span>
+          <AppModeSwitch />
+          <span className="hidden lg:block">Powered by Firecrawl &amp; ElevenLabs</span>
         </motion.div>
       </motion.header>
 

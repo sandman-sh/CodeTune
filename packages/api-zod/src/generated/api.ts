@@ -60,3 +60,61 @@ export const CreateShareCardResponse = zod.object({
   shareUrl: zod.string(),
   shareText: zod.string(),
 });
+
+export const RepoAnalyzeBody = zod.object({
+  repoUrl: zod.string().describe("GitHub repository URL"),
+});
+
+export const RepoAnalysisCodeDNA = zod.object({
+  developerType: zod.enum(["solo", "team", "chaotic"]),
+  codeStyle: zod.enum(["clean", "messy", "optimized"]),
+  techStack: zod.array(zod.string()),
+  complexityLevel: zod.enum(["Low", "Medium", "High"]),
+  riskLevel: zod.enum(["Low", "Medium", "High"]),
+});
+
+export const RepoAnalysisSummary = zod.object({
+  whatItDoes: zod.string(),
+  whoItsFor: zod.string(),
+  howToRun: zod.string(),
+  keyFiles: zod.array(zod.string()),
+});
+
+export const RepoAnalyzeResponse = zod.object({
+  repoName: zod.string(),
+  repoDescription: zod.string(),
+  codeDNA: RepoAnalysisCodeDNA,
+  summary: RepoAnalysisSummary,
+  voiceIntro: zod.string(),
+  rawContext: zod.string(),
+});
+
+export const RepoChatHistoryMessage = zod.object({
+  role: zod.enum(["user", "assistant"]),
+  content: zod.string(),
+});
+
+export const ChatMessageBody = zod.object({
+  message: zod.string(),
+  repoContext: zod.string(),
+  repoName: zod.string(),
+  history: zod.array(RepoChatHistoryMessage).default([]),
+});
+
+export const VoiceSynthesizeBody = zod.object({
+  text: zod.string(),
+});
+
+export const VoiceSynthesizeResponse = zod.object({
+  audioBase64: zod.string(),
+  mimeType: zod.string(),
+});
+
+export const VoiceTranscribeBody = zod.object({
+  audioBase64: zod.string(),
+  mimeType: zod.string(),
+});
+
+export const VoiceTranscribeResponse = zod.object({
+  text: zod.string(),
+});

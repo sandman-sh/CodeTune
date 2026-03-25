@@ -151,9 +151,22 @@ html:not(.dark) {
   outline: none;
 }
 
-/* Subtle cursor glow on interactive elements */
-button, a, input {
+/* Interactive elements */
+button, a {
   cursor: pointer;
+}
+
+input, textarea {
+  cursor: text;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 /* Lyrics line hover */
