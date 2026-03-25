@@ -32,10 +32,10 @@ export default function Landing() {
             Choose a Mode
           </div>
           <h1 className="text-4xl font-bold tracking-[-0.05em] sm:text-5xl">
-            Choose how you want to use CodeTune.
+            Experience your code in a new way
           </h1>
           <p className="mx-auto mt-4 max-w-xl text-sm leading-7 text-muted-foreground sm:text-base">
-            Start with a simple mode choice, then jump straight in.
+            Turn repos into music or conversation.
           </p>
 
           <motion.div
