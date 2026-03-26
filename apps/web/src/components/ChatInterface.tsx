@@ -26,6 +26,8 @@ export interface ChatQuickAction {
 interface ChatInterfaceProps {
   repoName: string;
   detectedLanguage: string;
+  filesLoaded?: string[];
+  providerUsed?: string | null;
   messages: RepoChatMessage[];
   isStreaming: boolean;
   isRecording: boolean;
@@ -55,6 +57,8 @@ const DEFAULT_QUICK_ACTIONS: ChatQuickAction[] = [
 export function ChatInterface({
   repoName,
   detectedLanguage,
+  filesLoaded = [],
+  providerUsed,
   messages,
   isStreaming,
   isRecording,
@@ -129,15 +133,36 @@ export function ChatInterface({
             <p className="truncate text-[14px] font-medium text-foreground">{repoName}</p>
           </div>
 
-          {detectedLanguage !== "Auto" ? (
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-              <Languages className="h-3 w-3" />
-              {headerLanguage}
-            </div>
-          ) : null}
+          <div className="flex items-center gap-2">
+            {providerUsed ? (
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                {providerUsed}
+              </div>
+            ) : null}
+            {detectedLanguage !== "Auto" ? (
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                <Languages className="h-3 w-3" />
+                {headerLanguage}
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div ref={messagesRef} className="no-scrollbar flex-1 space-y-4 overflow-y-auto bg-background p-4">
+          {filesLoaded.length > 0 ? (
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Context</span>
+              {filesLoaded.slice(0, 6).map((entry) => (
+                <span
+                  key={entry}
+                  className="inline-flex max-w-[12rem] items-center rounded-full border border-border bg-card px-2.5 py-1 text-[10px] text-muted-foreground"
+                >
+                  <span className="truncate">{entry}</span>
+                </span>
+              ))}
+            </div>
+          ) : null}
+
           {quickActions.length > 0 && messages.length > 0 ? (
             <div className="mb-1 flex flex-wrap gap-2">
               {quickActions.map(({ id, label, Icon }) => (

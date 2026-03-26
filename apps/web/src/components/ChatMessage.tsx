@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Bot, LoaderCircle, Square, Volume2 } from "lucide-react";
+import { Bot, LoaderCircle, Square, User, Volume2 } from "lucide-react";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import type { RepoChatMessage } from "@/lib/talk-to-repo";
 import { cn } from "@/lib/utils";
@@ -29,7 +29,7 @@ export function ChatMessage({ message, onListen, onStop, isPlaying, isSynthesizi
           )}
         >
           {isUser ? (
-            <span className="text-[10px] font-semibold uppercase">You</span>
+            <User className="h-3.5 w-3.5" />
           ) : (
             <Bot className="h-3.5 w-3.5" />
           )}

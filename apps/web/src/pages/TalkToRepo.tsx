@@ -79,7 +79,7 @@ export default function TalkToRepo() {
     stopRecording,
   } = useVoice();
 
-  const { messages, isStreaming, detectedLanguage, sendMessage, pushLocalExchange, reset, error: chatError } = useChat({
+  const { messages, isStreaming, detectedLanguage, filesLoaded, providerUsed, sendMessage, pushLocalExchange, reset, error: chatError } = useChat({
     repoName: analysis?.repoName || "",
     repoContext: analysis?.rawContext || "",
   });
@@ -256,6 +256,8 @@ export default function TalkToRepo() {
             <ChatInterface
               repoName={analysis.repoName}
               detectedLanguage={detectedLanguage}
+              filesLoaded={filesLoaded}
+              providerUsed={providerUsed}
               messages={messages}
               isStreaming={isStreaming}
               isRecording={isRecording}
@@ -277,7 +279,19 @@ export default function TalkToRepo() {
                   });
                 }
               }}
-              onStopRecording={stopRecording}
+              onStopRecording={async () => {
+                try {
+                  return await stopRecording();
+                } catch (recordError) {
+                  toast({
+                    title: "Voice input unavailable",
+                    description:
+                      recordError instanceof Error ? recordError.message : "We could not transcribe your microphone input.",
+                    variant: "destructive",
+                  });
+                  return "";
+                }
+              }}
               quickActions={quickActions}
               onQuickAction={handleQuickAction}
               error={chatError}

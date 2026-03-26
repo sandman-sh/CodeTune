@@ -20,6 +20,8 @@ export function useChat({ repoName, repoContext }: UseChatOptions) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [detectedLanguage, setDetectedLanguage] = useState("Auto");
   const [error, setError] = useState<string | null>(null);
+  const [filesLoaded, setFilesLoaded] = useState<string[]>([]);
+  const [providerUsed, setProviderUsed] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -33,6 +35,8 @@ export function useChat({ repoName, repoContext }: UseChatOptions) {
     setIsStreaming(false);
     setDetectedLanguage("Auto");
     setError(null);
+    setFilesLoaded([]);
+    setProviderUsed(null);
   }, []);
 
   const pushLocalExchange = useCallback((userContent: string, assistantContent: string) => {
@@ -52,6 +56,8 @@ export function useChat({ repoName, repoContext }: UseChatOptions) {
     const nextHistory = [...messages, userMessage];
     setMessages([...nextHistory, assistantMessage]);
     setError(null);
+    setFilesLoaded([]);
+    setProviderUsed(null);
     setIsStreaming(true);
 
     const controller = new AbortController();
@@ -110,6 +116,12 @@ export function useChat({ repoName, repoContext }: UseChatOptions) {
             if (payload.error) {
               throw new Error(payload.error);
             }
+            if (payload.filesLoaded?.length) {
+              setFilesLoaded(payload.filesLoaded);
+            }
+            if (payload.providerUsed) {
+              setProviderUsed(payload.providerUsed);
+            }
             if (payload.content) {
               assistantText += payload.content;
               if (detectedLanguage === "Auto" && assistantText.trim().length >= 8) {
@@ -166,6 +178,8 @@ export function useChat({ repoName, repoContext }: UseChatOptions) {
     isStreaming,
     detectedLanguage,
     error,
+    filesLoaded,
+    providerUsed,
     sendMessage,
     pushLocalExchange,
     reset,

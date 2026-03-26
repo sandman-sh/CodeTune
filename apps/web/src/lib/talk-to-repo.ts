@@ -16,6 +16,12 @@ export interface RepoAnalysis {
   };
   voiceIntro: string;
   rawContext: string;
+  providerUsed?: string;
+  providerAttempts?: Array<{
+    provider: string;
+    status: "success" | "failed";
+    error?: string;
+  }>;
 }
 
 export interface RepoChatMessage {
@@ -38,6 +44,13 @@ export interface ChatStreamPayload {
   content?: string;
   done?: boolean;
   error?: string;
+  filesLoaded?: string[];
+  providerUsed?: string;
+  providerAttempts?: Array<{
+    provider: string;
+    status: "success" | "failed";
+    error?: string;
+  }>;
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {

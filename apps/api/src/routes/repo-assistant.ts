@@ -17,6 +17,15 @@ const ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL";
 const ELEVENLABS_MODEL_ID = "eleven_multilingual_v2";
 const MAX_ANALYZE_CONTEXT = 24000;
 const MAX_CHAT_CONTEXT = 12000;
+const MAX_RELEVANT_FILE_CHARS = 7000;
+const MAX_RELEVANT_FILES = 3;
+const MAX_STRUCTURE_CONTEXT_CHARS = 4500;
+const MAX_ARCHITECTURE_CONTEXT_CHARS = 6000;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-001";
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+
+type AiProvider = "openrouter" | "deepseek" | "groq" | "gemini";
 
 type FetchResponseLike = {
   ok: boolean;
@@ -42,6 +51,20 @@ type RepoTreeItem = {
   path: string;
   type: "blob" | "tree";
   size?: number;
+};
+
+const repoTreeCache = new Map<string, RepoTreeItem[]>();
+const rawFileCache = new Map<string, string>();
+
+type OpenAiLikeMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+type ProviderAttempt = {
+  provider: AiProvider;
+  status: "success" | "failed";
+  error?: string;
 };
 
 type AnalyzedRepo = {
@@ -123,6 +146,43 @@ function getGeminiApiKey(): string {
   return apiKey;
 }
 
+function getProviderApiKey(provider: Exclude<AiProvider, "gemini">): string {
+  const apiKey =
+    provider === "openrouter"
+      ? process.env.OPENROUTER_API_KEY
+      : provider === "deepseek"
+      ? process.env.DEEPSEEK_API_KEY
+      : process.env.GROQ_API_KEY;
+
+  if (!apiKey) {
+    throw new Error(`${provider.toUpperCase()} API key is not set`);
+  }
+
+  return apiKey;
+}
+
+function getAvailableProviders(): AiProvider[] {
+  const providers: AiProvider[] = [];
+  if (process.env.OPENROUTER_API_KEY) providers.push("openrouter");
+  if (process.env.DEEPSEEK_API_KEY) providers.push("deepseek");
+  if (process.env.GROQ_API_KEY) providers.push("groq");
+  if (process.env.GEMINI_API_KEY) providers.push("gemini");
+  return providers;
+}
+
+function getProviderModel(provider: AiProvider): string {
+  if (provider === "openrouter") return OPENROUTER_MODEL;
+  if (provider === "deepseek") return DEEPSEEK_MODEL;
+  if (provider === "groq") return GROQ_MODEL;
+  return GEMINI_CHAT_MODEL;
+}
+
+function getProviderBaseUrl(provider: Exclude<AiProvider, "gemini">): string {
+  if (provider === "openrouter") return "https://openrouter.ai/api/v1/chat/completions";
+  if (provider === "deepseek") return "https://api.deepseek.com/chat/completions";
+  return "https://api.groq.com/openai/v1/chat/completions";
+}
+
 function getFirecrawlClient(): FirecrawlApp {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) {
@@ -185,6 +245,206 @@ async function geminiGenerateContent(
   return response.json();
 }
 
+async function openAiCompatibleGenerateContent(
+  provider: Exclude<AiProvider, "gemini">,
+  payload: {
+    model: string;
+    messages: OpenAiLikeMessage[];
+    temperature?: number;
+    response_format?: { type: "json_object" };
+  },
+): Promise<string> {
+  const apiKey = getProviderApiKey(provider);
+  const responseRaw = await fetch(getProviderBaseUrl(provider), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+      ...(provider === "openrouter"
+        ? {
+            "HTTP-Referer": "https://thecodetune.vercel.app",
+            "X-Title": "CodeTune",
+          }
+        : {}),
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(45000),
+  });
+  const response = responseRaw as FetchResponseLike;
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`${provider} request failed (${response.status}): ${message}`);
+  }
+
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string | Array<{ text?: string; type?: string }> } }>;
+  };
+  const content = data.choices?.[0]?.message?.content;
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((entry) => (typeof entry?.text === "string" ? entry.text : ""))
+      .join("")
+      .trim();
+  }
+  return "";
+}
+
+async function openAiCompatibleStreamGenerateContent(
+  provider: Exclude<AiProvider, "gemini">,
+  payload: {
+    model: string;
+    messages: OpenAiLikeMessage[];
+    temperature?: number;
+  },
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const apiKey = getProviderApiKey(provider);
+  const responseRaw = await fetch(getProviderBaseUrl(provider), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+      ...(provider === "openrouter"
+        ? {
+            "HTTP-Referer": "https://thecodetune.vercel.app",
+            "X-Title": "CodeTune",
+          }
+        : {}),
+    },
+    body: JSON.stringify({
+      ...payload,
+      stream: true,
+    }),
+    signal: AbortSignal.timeout(45000),
+  });
+  const response = responseRaw as FetchResponseLike;
+  if (!response.ok || !response.body) {
+    const message = await response.text();
+    throw new Error(`${provider} stream request failed (${response.status}): ${message}`);
+  }
+
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffer = "";
+  let completeText = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const eventChunk = buffer.slice(0, boundary).trim();
+      buffer = buffer.slice(boundary + 2);
+
+      const lines = eventChunk.split("\n").map((line) => line.trim()).filter(Boolean);
+      const dataLines = lines.filter((line) => line.startsWith("data:"));
+      const dataText = dataLines.map((line) => line.slice(5).trim()).join("");
+
+      if (!dataText || dataText === "[DONE]") {
+        boundary = buffer.indexOf("\n\n");
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(dataText) as {
+          choices?: Array<{ delta?: { content?: string | Array<{ text?: string }> } }>;
+        };
+        const delta = parsed.choices?.[0]?.delta?.content;
+        const chunkText =
+          typeof delta === "string"
+            ? delta
+            : Array.isArray(delta)
+            ? delta.map((entry) => (typeof entry?.text === "string" ? entry.text : "")).join("")
+            : "";
+        if (chunkText) {
+          completeText += chunkText;
+          onChunk(chunkText);
+        }
+      } catch {
+        // Ignore malformed partial events and continue.
+      }
+
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  return completeText.trim();
+}
+
+async function geminiStreamGenerateContent(
+  model: string,
+  payload: Record<string, unknown>,
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const apiKey = getGeminiApiKey();
+  const responseRaw = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(45000),
+    },
+  );
+  const response = responseRaw as FetchResponseLike;
+  if (!response.ok || !response.body) {
+    const message = await response.text();
+    throw new Error(`Gemini stream request failed (${response.status}): ${message}`);
+  }
+
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffer = "";
+  let completeText = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const eventChunk = buffer.slice(0, boundary).trim();
+      buffer = buffer.slice(boundary + 2);
+
+      const lines = eventChunk.split("\n").map((line) => line.trim()).filter(Boolean);
+      const dataLines = lines.filter((line) => line.startsWith("data:"));
+      if (!dataLines.length) {
+        boundary = buffer.indexOf("\n\n");
+        continue;
+      }
+
+      const dataText = dataLines.map((line) => line.slice(5).trim()).join("");
+      if (!dataText || dataText === "[DONE]") {
+        boundary = buffer.indexOf("\n\n");
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(dataText);
+        const chunkText = extractGeminiText(parsed);
+        if (chunkText) {
+          completeText += chunkText;
+          onChunk(chunkText);
+        }
+      } catch {
+        // Ignore malformed partial events and continue streaming.
+      }
+
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  return completeText.trim();
+}
+
 function extractGeminiText(data: unknown): string {
   const candidates = (data as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> })?.candidates;
   const parts = candidates?.[0]?.content?.parts || [];
@@ -192,6 +452,82 @@ function extractGeminiText(data: unknown): string {
     .map((part) => (typeof part.text === "string" ? part.text : ""))
     .join("")
     .trim();
+}
+
+function extractFirstJsonObject(text: string): string {
+  const trimmed = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    return trimmed.slice(start, end + 1);
+  }
+  return trimmed;
+}
+
+function normalizeArrayOfStrings(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry).trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/[,\n]/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function normalizeAnalysisPayload(raw: unknown, metadata: RepoMetadata, rawContext: string, files: Array<{ path: string; content: string }>) {
+  const source = (raw as Record<string, unknown>) || {};
+  const codeDna = (source.codeDNA as Record<string, unknown>) || {};
+  const summary = (source.summary as Record<string, unknown>) || {};
+
+  const normalized = {
+    repoName: metadata.repoName,
+    repoDescription:
+      typeof source.repoDescription === "string" && source.repoDescription.trim()
+        ? source.repoDescription.trim()
+        : metadata.description || `A ${metadata.language} repository.`,
+    codeDNA: {
+      developerType:
+        codeDna.developerType === "team" || codeDna.developerType === "chaotic" ? codeDna.developerType : "solo",
+      codeStyle:
+        codeDna.codeStyle === "messy" || codeDna.codeStyle === "optimized" ? codeDna.codeStyle : "clean",
+      techStack: normalizeArrayOfStrings(codeDna.techStack).length
+        ? normalizeArrayOfStrings(codeDna.techStack)
+        : [metadata.language || "Unknown"],
+      complexityLevel:
+        codeDna.complexityLevel === "Medium" || codeDna.complexityLevel === "High" ? codeDna.complexityLevel : "Low",
+      riskLevel:
+        codeDna.riskLevel === "Medium" || codeDna.riskLevel === "High" ? codeDna.riskLevel : "Low",
+    },
+    summary: {
+      whatItDoes:
+        typeof summary.whatItDoes === "string" && summary.whatItDoes.trim()
+          ? summary.whatItDoes.trim()
+          : typeof source.summary === "string" && source.summary.trim()
+          ? source.summary.trim()
+          : metadata.description || "This repository contains application code and documentation.",
+      whoItsFor:
+        typeof summary.whoItsFor === "string" && summary.whoItsFor.trim()
+          ? summary.whoItsFor.trim()
+          : "Developers evaluating, extending, or running this project.",
+      howToRun:
+        typeof summary.howToRun === "string" && summary.howToRun.trim()
+          ? summary.howToRun.trim()
+          : "Read the README, install dependencies, and follow the project-specific setup commands listed there.",
+      keyFiles: normalizeArrayOfStrings(summary.keyFiles).length
+        ? normalizeArrayOfStrings(summary.keyFiles)
+        : files.map((file) => file.path).slice(0, 8),
+    },
+    voiceIntro:
+      typeof source.voiceIntro === "string" && source.voiceIntro.trim()
+        ? source.voiceIntro.trim()
+        : `Hey, I am ${metadata.repoName}. I can help you understand this repository, how it runs, and what the important files are.`,
+    rawContext,
+  };
+
+  return RepoAnalyzeResponse.parse(normalized);
 }
 
 function chunkText(text: string, size = 32): string[] {
@@ -202,12 +538,56 @@ function chunkText(text: string, size = 32): string[] {
   return chunks.length ? chunks : [text];
 }
 
+function parseRepoStructure(repoContext: string) {
+  const lines = repoContext.split("\n").map((line) => line.trim()).filter(Boolean);
+  const topLevelDirectoriesLine = lines.find((line) => line.startsWith("Top-level directories:"));
+  const notableFilesLine = lines.find((line) => line.startsWith("Notable files:"));
+  const fileCountLine = lines.find((line) => line.startsWith("Repository file count:"));
+
+  return {
+    lines,
+    topLevelDirectories: topLevelDirectoriesLine
+      ? topLevelDirectoriesLine.replace(/^Top-level directories:\s*/, "").split(",").map((entry) => entry.trim()).filter(Boolean)
+      : [],
+    notableFiles: notableFilesLine
+      ? notableFilesLine.replace(/^Notable files:\s*/, "").split(",").map((entry) => entry.trim()).filter(Boolean)
+      : [],
+    fileCount: fileCountLine ? Number(fileCountLine.replace(/^Repository file count:\s*/, "").trim()) : null,
+  };
+}
+
 function buildFallbackChatReply(repoName: string, repoContext: string, message: string): string {
   const lowerMessage = message.toLowerCase();
-  const lines = repoContext.split("\n").map((line) => line.trim()).filter(Boolean);
+  const structure = parseRepoStructure(repoContext);
+  const lines = structure.lines;
   const description = lines.find((line) => line.startsWith("Description:"))?.replace(/^Description:\s*/, "");
   const language = lines.find((line) => line.startsWith("Primary language:"))?.replace(/^Primary language:\s*/, "");
   const hasReadme = lines.some((line) => line.toLowerCase().includes("readme markdown"));
+
+  if (
+    lowerMessage.includes("how many file") ||
+    lowerMessage.includes("number of file") ||
+    lowerMessage.includes("file count")
+  ) {
+    return [
+      `${repoName} is answering from the repo context fallback.`,
+      structure.fileCount !== null ? `I found about ${structure.fileCount} files in the repository tree.` : "I could not determine the exact file count from the current repo snapshot.",
+      structure.topLevelDirectories.length ? `Top-level folders: ${structure.topLevelDirectories.join(", ")}.` : "",
+      structure.notableFiles.length ? `Notable files: ${structure.notableFiles.slice(0, 8).join(", ")}.` : "",
+    ].filter(Boolean).join(" ");
+  }
+
+  if (
+    (lowerMessage.includes("list") || lowerMessage.includes("show")) &&
+    (lowerMessage.includes("folder") || lowerMessage.includes("directory") || lowerMessage.includes("file"))
+  ) {
+    return [
+      `${repoName} is answering from the repo context fallback.`,
+      structure.topLevelDirectories.length ? `Top-level folders: ${structure.topLevelDirectories.join(", ")}.` : "I could not extract a top-level folder list from the current repo snapshot.",
+      structure.notableFiles.length ? `Notable files I found: ${structure.notableFiles.slice(0, 10).join(", ")}.` : "",
+      structure.fileCount !== null ? `Total file count in the tree snapshot: ${structure.fileCount}.` : "",
+    ].filter(Boolean).join(" ");
+  }
 
   if (lowerMessage.includes("run") || lowerMessage.includes("install")) {
     return [
@@ -222,6 +602,8 @@ function buildFallbackChatReply(repoName: string, repoContext: string, message: 
     return [
       `${repoName} is answering from the repo context fallback.`,
       description ? `Core summary: ${description}` : "",
+      structure.topLevelDirectories.length ? `Top-level folders: ${structure.topLevelDirectories.join(", ")}.` : "",
+      structure.notableFiles.length ? `Notable files: ${structure.notableFiles.slice(0, 8).join(", ")}.` : "",
       hasReadme ? "The README looks like the best source of architecture notes." : "The scraped context is light, so inspect the entry files and README first.",
     ].filter(Boolean).join(" ");
   }
@@ -250,6 +632,20 @@ async function fetchGitHubJson<T>(path: string): Promise<T | null> {
   }
 }
 
+function buildRepoMetadataFromName(repoName: string): RepoMetadata {
+  const [owner = "", repo = ""] = repoName.split("/");
+  return {
+    owner,
+    repo,
+    repoName,
+    defaultBranch: "main",
+    description: "",
+    homepage: "",
+    topics: [],
+    language: "Unknown",
+  };
+}
+
 async function fetchRepoMetadata(repoUrl: string): Promise<RepoMetadata> {
   const { owner, repo, repoName } = extractRepoParts(repoUrl);
   const repoData = await fetchGitHubJson<{
@@ -270,6 +666,20 @@ async function fetchRepoMetadata(repoUrl: string): Promise<RepoMetadata> {
     topics: repoData?.topics || [],
     language: repoData?.language || "Unknown",
   };
+}
+
+async function fetchRepoTree(metadata: RepoMetadata): Promise<RepoTreeItem[]> {
+  const cacheKey = `${metadata.repoName}@${metadata.defaultBranch}`;
+  const cached = repoTreeCache.get(cacheKey);
+  if (cached) return cached;
+
+  const treeData = await fetchGitHubJson<{ tree?: RepoTreeItem[] }>(
+    `/repos/${metadata.repoName}/git/trees/${metadata.defaultBranch}?recursive=1`,
+  );
+
+  const tree = treeData?.tree || [];
+  repoTreeCache.set(cacheKey, tree);
+  return tree;
 }
 
 async function scrapeMarkdown(url: string): Promise<string> {
@@ -363,11 +773,7 @@ function buildRepoTreeSummary(tree: RepoTreeItem[]): string {
 }
 
 async function fetchImportantFileSamples(metadata: RepoMetadata): Promise<{ files: Array<{ path: string; content: string }>; treeSummary: string }> {
-  const treeData = await fetchGitHubJson<{ tree?: RepoTreeItem[] }>(
-    `/repos/${metadata.repoName}/git/trees/${metadata.defaultBranch}?recursive=1`,
-  );
-
-  const tree = treeData?.tree || [];
+  const tree = await fetchRepoTree(metadata);
   const treeSummary = buildRepoTreeSummary(tree);
   const selectedPaths = pickImportantFiles(tree);
   const files = await Promise.all(
@@ -392,6 +798,296 @@ async function fetchImportantFileSamples(metadata: RepoMetadata): Promise<{ file
   return {
     files: files.filter((file): file is { path: string; content: string } => Boolean(file)),
     treeSummary,
+  };
+}
+
+function extractMentionedPaths(message: string): string[] {
+  const matches = message.match(/[`'"]?([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)[`'"]?/g) || [];
+  return uniqueStrings(
+    matches
+      .map((match) => match.replace(/[`'"]/g, "").trim())
+      .filter((match) => match.includes(".")),
+  );
+}
+
+function extractMessageTokens(message: string): string[] {
+  return uniqueStrings(
+    message
+      .toLowerCase()
+      .split(/[^a-z0-9./_-]+/)
+      .filter((entry) => entry.length >= 3),
+  );
+}
+
+function isStructureQuestion(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("structure") ||
+    lower.includes("folder") ||
+    lower.includes("directory") ||
+    lower.includes("file tree") ||
+    lower.includes("file count") ||
+    lower.includes("how many file") ||
+    ((lower.includes("show") || lower.includes("list")) && (lower.includes("file") || lower.includes("folder")))
+  );
+}
+
+function isArchitectureQuestion(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("architecture") ||
+    lower.includes("organize") ||
+    lower.includes("organised") ||
+    lower.includes("organized") ||
+    lower.includes("structure") ||
+    lower.includes("codebase") ||
+    lower.includes("how does this repo work") ||
+    lower.includes("how is this repo built")
+  );
+}
+
+function scoreArchitecturePath(filePath: string): number {
+  const lower = normalizePath(filePath).toLowerCase();
+  let score = 0;
+  if (/^architecture\.md$/.test(lower) || /(^|\/)architecture\.md$/.test(lower)) score += 150;
+  if (/(^|\/)(docs|doc)\/.*architecture/i.test(lower)) score += 135;
+  if (/^package\.json$/.test(lower) || /^pnpm-workspace\.yaml$/.test(lower)) score += 120;
+  if (/^taskfile\.ya?ml$/.test(lower) || /^makefile$/.test(lower) || /^compose\.ya?ml$/.test(lower)) score += 110;
+  if (/^readme\.md$/.test(lower)) score += 110;
+  if (/^dockerfile$/.test(lower) || /^docker-compose/.test(lower)) score += 95;
+  if (/^tsconfig.*\.json$/.test(lower) || /^vite\.config\./.test(lower) || /^next\.config\./.test(lower)) score += 95;
+  if (/^src\/(main|index|app|server|router)\./.test(lower)) score += 105;
+  if (/^(src|app|server|api|routes|lib|components|pages|cmd|internal|pkg)\//.test(lower)) score += 55;
+  if (/config|settings|schema|middleware|controller|service/.test(lower)) score += 35;
+  if (/test|spec|fixture|mock/.test(lower)) score -= 25;
+  if ((lower.match(/\//g) || []).length <= 1) score += 12;
+  return score;
+}
+
+function selectArchitectureFiles(tree: RepoTreeItem[]): string[] {
+  return uniqueStrings(
+    tree
+      .filter((item) => item.type === "blob")
+      .map((item) => normalizePath(item.path))
+      .map((filePath) => ({ path: filePath, score: scoreArchitecturePath(filePath) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.path),
+  ).slice(0, MAX_RELEVANT_FILES);
+}
+
+function buildArchitectureContext(message: string, tree: RepoTreeItem[]): { context: string; loaded: string[] } {
+  if (!isArchitectureQuestion(message)) {
+    return { context: "", loaded: [] };
+  }
+
+  const blobPaths = tree
+    .filter((item) => item.type === "blob")
+    .map((item) => normalizePath(item.path));
+  const directories = uniqueStrings(
+    blobPaths
+      .map((filePath) => filePath.split("/").slice(0, -1).join("/"))
+      .filter(Boolean),
+  );
+  const topLevelDirectories = directories.filter((directory) => !directory.includes("/")).slice(0, 12);
+  const importantFiles = blobPaths
+    .map((filePath) => ({ path: filePath, score: scoreArchitecturePath(filePath) }))
+    .sort((a, b) => b.score - a.score)
+    .map((entry) => entry.path)
+    .slice(0, 14);
+
+  const architecturalDirectories = uniqueStrings(
+    directories
+      .filter((directory) =>
+        /^(src|app|server|api|routes|components|pages|lib|cmd|internal|pkg)(\/|$)/i.test(directory),
+      )
+      .slice(0, 8),
+  );
+
+  const directorySections = architecturalDirectories.map((directory) => {
+    const children = blobPaths
+      .filter((filePath) => filePath.startsWith(`${directory}/`))
+      .slice(0, 10);
+    return `Area: ${directory}\n${children.join("\n")}`;
+  });
+
+  const entrypoints = importantFiles.filter((filePath) =>
+    /(^package\.json$|^readme\.md$|^src\/(main|index|app|server|router)\.|^app\/page\.|^server\/|^api\/|^routes\/)/i.test(filePath),
+  );
+
+  const context = truncateText(
+    [
+      "Architecture-oriented repository snapshot:",
+      topLevelDirectories.length ? `Top-level directories: ${topLevelDirectories.join(", ")}` : "",
+      entrypoints.length ? `Likely entrypoints and config files: ${entrypoints.join(", ")}` : "",
+      importantFiles.length ? `Important architectural files: ${importantFiles.join(", ")}` : "",
+      directorySections.length ? directorySections.join("\n\n") : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    MAX_ARCHITECTURE_CONTEXT_CHARS,
+  );
+
+  return {
+    context,
+    loaded: uniqueStrings([...topLevelDirectories, ...importantFiles.slice(0, 8), ...architecturalDirectories]),
+  };
+}
+
+function selectRelevantFiles(message: string, tree: RepoTreeItem[]): string[] {
+  const fileItems = tree.filter((item) => item.type === "blob");
+  const lowerMessage = message.toLowerCase();
+  const mentionedPaths = extractMentionedPaths(message).map((entry) => normalizePath(entry).toLowerCase());
+  const intentBoosts = [
+    lowerMessage.includes("run") || lowerMessage.includes("install") ? ["package.json", "requirements.txt", "pyproject.toml", "cargo.toml", "go.mod", "dockerfile", "docker-compose.yml", "README.md"] : [],
+    lowerMessage.includes("config") ? ["tsconfig.json", "vite.config.ts", ".env.example", "tailwind.config.ts", "next.config.js"] : [],
+    lowerMessage.includes("route") || lowerMessage.includes("api") ? ["routes", "api", "server", "controller"] : [],
+  ].flat();
+
+  const ranked = fileItems
+    .map((item) => {
+      const normalized = normalizePath(item.path);
+      const lowerPath = normalized.toLowerCase();
+      const baseName = lowerPath.split("/").pop() || lowerPath;
+      let score = 0;
+
+      for (const mention of mentionedPaths) {
+        if (lowerPath === mention) score += 200;
+        else if (lowerPath.endsWith(`/${mention}`)) score += 160;
+        else if (baseName === mention) score += 140;
+        else if (lowerPath.includes(mention)) score += 90;
+      }
+
+      for (const boost of intentBoosts) {
+        if (boost.includes("/") ? lowerPath.includes(boost) : baseName === boost.toLowerCase() || lowerPath.includes(boost.toLowerCase())) {
+          score += 45;
+        }
+      }
+
+      const pathTokens = lowerPath.split(/[/.\\_-]+/).filter(Boolean);
+      for (const token of uniqueStrings(lowerMessage.split(/[^a-z0-9.]+/).filter((entry) => entry.length >= 3))) {
+        if (baseName.includes(token)) score += 20;
+        if (pathTokens.includes(token)) score += 12;
+      }
+
+      if (/readme\.md$/i.test(normalized)) score += 10;
+      if ((item.size || 0) > 120000) score -= 15;
+
+      return { path: normalized, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return uniqueStrings(ranked.map((item) => item.path)).slice(0, MAX_RELEVANT_FILES);
+}
+
+async function fetchRawFileContent(metadata: RepoMetadata, filePath: string): Promise<string> {
+  const normalized = normalizePath(filePath);
+  const cacheKey = `${metadata.repoName}@${metadata.defaultBranch}:${normalized}`;
+  const cached = rawFileCache.get(cacheKey);
+  if (cached) return cached;
+
+  const responseRaw = await fetch(
+    `https://raw.githubusercontent.com/${metadata.repoName}/${metadata.defaultBranch}/${normalized}`,
+    { signal: AbortSignal.timeout(12000) },
+  );
+  const response = responseRaw as FetchResponseLike;
+  if (!response.ok) {
+    throw new Error(`Could not fetch raw file: ${normalized}`);
+  }
+
+  const content = truncateText(await response.text(), Math.ceil(MAX_RELEVANT_FILE_CHARS / MAX_RELEVANT_FILES)).trim();
+  rawFileCache.set(cacheKey, content);
+  return content;
+}
+
+function buildLiveStructureContext(message: string, tree: RepoTreeItem[]): { context: string; loaded: string[] } {
+  if (!isStructureQuestion(message)) {
+    return { context: "", loaded: [] };
+  }
+
+  const blobPaths = tree.filter((item) => item.type === "blob").map((item) => normalizePath(item.path));
+  const directories = uniqueStrings(
+    blobPaths
+      .map((filePath) => filePath.split("/").slice(0, -1).join("/"))
+      .filter(Boolean),
+  );
+  const topLevelDirectories = directories.filter((directory) => !directory.includes("/")).slice(0, 15);
+  const topLevelFiles = blobPaths.filter((filePath) => !filePath.includes("/")).slice(0, 15);
+  const tokens = extractMessageTokens(message);
+
+  const matchingDirectories = directories
+    .filter((directory) => tokens.some((token) => directory.toLowerCase().includes(token)))
+    .slice(0, 4);
+
+  const matchingDirectorySections = matchingDirectories.map((directory) => {
+    const children = blobPaths
+      .filter((filePath) => filePath.startsWith(`${directory}/`))
+      .slice(0, 12);
+    return `Folder: ${directory}\n${children.join("\n")}`;
+  });
+
+  const notableFiles = pickImportantFiles(tree).slice(0, 12);
+  const loaded = uniqueStrings([
+    ...matchingDirectories,
+    ...notableFiles.slice(0, 6),
+  ]);
+
+  const context = truncateText(
+    [
+      `Live repository structure snapshot:`,
+      `Total files: ${blobPaths.length}`,
+      topLevelDirectories.length ? `Top-level directories: ${topLevelDirectories.join(", ")}` : "",
+      topLevelFiles.length ? `Top-level files: ${topLevelFiles.join(", ")}` : "",
+      notableFiles.length ? `Notable files: ${notableFiles.join(", ")}` : "",
+      matchingDirectorySections.length ? matchingDirectorySections.join("\n\n") : "",
+    ].filter(Boolean).join("\n\n"),
+    MAX_STRUCTURE_CONTEXT_CHARS,
+  );
+
+  return { context, loaded };
+}
+
+async function fetchRelevantFileContext(repoName: string, message: string): Promise<{ context: string; loaded: string[] }> {
+  const baseMetadata = buildRepoMetadataFromName(repoName);
+  const metadata = {
+    ...(await fetchRepoMetadata(`https://github.com/${repoName}`).catch(() => baseMetadata)),
+  };
+  const tree = await fetchRepoTree(metadata);
+  const structureContext = buildLiveStructureContext(message, tree);
+  const architectureContext = buildArchitectureContext(message, tree);
+  const selectedFiles = uniqueStrings([
+    ...selectRelevantFiles(message, tree),
+    ...(isArchitectureQuestion(message) ? selectArchitectureFiles(tree) : []),
+  ]).slice(0, MAX_RELEVANT_FILES);
+
+  if (!selectedFiles.length) {
+    return {
+      context: [architectureContext.context, structureContext.context].filter(Boolean).join("\n\n"),
+      loaded: uniqueStrings([...architectureContext.loaded, ...structureContext.loaded]),
+    };
+  }
+
+  const fileChunks = await Promise.all(
+    selectedFiles.map(async (filePath) => {
+      try {
+        const content = await fetchRawFileContent(metadata, filePath);
+        return content ? `File: ${filePath}\n${content}` : "";
+      } catch {
+        return "";
+      }
+    }),
+  );
+
+  const combined = fileChunks.filter(Boolean).join("\n\n");
+  const contextParts = [architectureContext.context, structureContext.context];
+  if (combined.trim()) {
+    contextParts.push(truncateText(`Relevant raw file context:\n${combined}`, MAX_RELEVANT_FILE_CHARS));
+  }
+
+  return {
+    context: contextParts.filter(Boolean).join("\n\n"),
+    loaded: uniqueStrings([...architectureContext.loaded, ...structureContext.loaded, ...selectedFiles]),
   };
 }
 
@@ -478,6 +1174,17 @@ function buildFallbackAnalysis(metadata: RepoMetadata, rawContext: string, files
   };
 }
 
+function buildChatStyleInstruction(): string {
+  return [
+    "Keep replies concise by default.",
+    "Unless the user explicitly asks for detail, answer in 3 to 6 short sentences or 3 to 5 short bullets.",
+    "Focus on the most relevant part of the repo instead of giving a full tour.",
+    "Mention only the key files or folders that support the answer.",
+    "If the user asks for architecture, summarize the structure at a high level first and avoid long exhaustive lists.",
+    "Only expand into a longer explanation when the user explicitly asks for deep detail, a full walkthrough, or step-by-step debugging.",
+  ].join(" ");
+}
+
 async function analyzeRepoWithGemini(metadata: RepoMetadata, rawContext: string, files: Array<{ path: string; content: string }>): Promise<AnalyzedRepo> {
   const data = await geminiGenerateContent(GEMINI_ANALYZE_MODEL, {
     system_instruction: {
@@ -529,8 +1236,143 @@ async function analyzeRepoWithGemini(metadata: RepoMetadata, rawContext: string,
   return parsed;
 }
 
+async function analyzeRepoWithOpenAiProvider(
+  provider: Exclude<AiProvider, "gemini">,
+  metadata: RepoMetadata,
+  rawContext: string,
+  files: Array<{ path: string; content: string }>,
+): Promise<AnalyzedRepo> {
+  const content = await openAiCompatibleGenerateContent(provider, {
+    model: getProviderModel(provider),
+    messages: [
+      {
+        role: "system",
+        content:
+          "You analyze GitHub repositories and return only valid JSON. Infer code personality from README, metadata, and file samples. Keep outputs concrete and useful for people trying to install, run, or debug the repo.",
+      },
+      {
+        role: "user",
+        content: [
+          `Repository: ${metadata.repoName}`,
+          metadata.description ? `GitHub description: ${metadata.description}` : "",
+          metadata.language !== "Unknown" ? `Primary language: ${metadata.language}` : "",
+          metadata.topics.length ? `Topics: ${metadata.topics.join(", ")}` : "",
+          files.length ? `Important files: ${files.map((file) => file.path).join(", ")}` : "",
+          "Analyze this repository context and return only a valid JSON object with keys repoDescription, codeDNA, summary, and voiceIntro.",
+          rawContext,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      },
+    ],
+    temperature: 0.35,
+    response_format: { type: "json_object" },
+  });
+
+  if (!content) {
+    throw new Error(`${provider} analyze returned an empty response.`);
+  }
+
+  return normalizeAnalysisPayload(JSON.parse(extractFirstJsonObject(content)), metadata, rawContext, files);
+}
+
+async function analyzeRepoWithFallbackProviders(
+  metadata: RepoMetadata,
+  rawContext: string,
+  files: Array<{ path: string; content: string }>,
+): Promise<{ analysis: AnalyzedRepo; providerUsed: AiProvider | "fallback"; providerAttempts: ProviderAttempt[] }> {
+  const providers = getAvailableProviders();
+  const attempts: ProviderAttempt[] = [];
+
+  for (const provider of providers) {
+    try {
+      if (provider === "gemini") {
+        const analysis = await analyzeRepoWithGemini(metadata, rawContext, files);
+        attempts.push({ provider, status: "success" });
+        return { analysis, providerUsed: provider, providerAttempts: attempts };
+      }
+      const analysis = await analyzeRepoWithOpenAiProvider(provider, metadata, rawContext, files);
+      attempts.push({ provider, status: "success" });
+      return { analysis, providerUsed: provider, providerAttempts: attempts };
+    } catch (error) {
+      attempts.push({
+        provider,
+        status: "failed",
+        error: error instanceof Error ? error.message.slice(0, 200) : "Unknown provider failure.",
+      });
+    }
+  }
+
+  return {
+    analysis: buildFallbackAnalysis(metadata, rawContext, files),
+    providerUsed: "fallback",
+    providerAttempts: attempts,
+  };
+}
+
 function writeSse(res: { write: (chunk: string) => void }, payload: Record<string, unknown>) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+async function streamChatWithProvider(
+  provider: AiProvider,
+  body: { repoName: string; message: string; history: Array<{ role: "user" | "assistant"; content: string }> },
+  combinedContext: string,
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const styleInstruction = buildChatStyleInstruction();
+
+  if (provider === "gemini") {
+    return geminiStreamGenerateContent(
+      GEMINI_CHAT_MODEL,
+      {
+        system_instruction: {
+          parts: [
+            {
+              text: `You are an AI embedded in the ${body.repoName} repo. Detect the user's language from their message and reply ENTIRELY in that same language. You help users install, run, understand, and debug this codebase. When relevant raw files are provided, use them directly and mention the file names you relied on. ${styleInstruction}\n\nRepository context:\n${combinedContext}`,
+            },
+          ],
+        },
+        contents: [
+          ...body.history.map((entry) => ({
+            role: entry.role === "assistant" ? "model" : "user",
+            parts: [{ text: entry.content }],
+          })),
+          {
+            role: "user",
+            parts: [{ text: body.message }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.5,
+        },
+      },
+      onChunk,
+    );
+  }
+
+  return openAiCompatibleStreamGenerateContent(
+    provider,
+    {
+      model: getProviderModel(provider),
+      messages: [
+        {
+          role: "system",
+          content: `You are an AI embedded in the ${body.repoName} GitHub repository. Detect the language of the user's message and reply entirely in that same language. You help users install, run, understand, and debug this codebase. Use actual file content when available and mention the file names you relied on. ${styleInstruction}\n\nRepository context:\n${combinedContext}`,
+        },
+        ...body.history.map((entry): OpenAiLikeMessage => ({
+          role: entry.role === "assistant" ? "assistant" : "user",
+          content: entry.content,
+        })),
+        {
+          role: "user" as const,
+          content: body.message,
+        },
+      ],
+      temperature: 0.5,
+    },
+    onChunk,
+  );
 }
 
 router.post("/repo/analyze", async (req: any, res: any) => {
@@ -554,13 +1396,17 @@ router.post("/repo/analyze", async (req: any, res: any) => {
       importantFileResult.treeSummary,
       importantFileResult.files,
     );
-    const analysis = process.env.GEMINI_API_KEY
-      ? await analyzeRepoWithGemini(metadata, rawContext, importantFileResult.files).catch(() =>
-          buildFallbackAnalysis(metadata, rawContext, importantFileResult.files),
-        )
-      : buildFallbackAnalysis(metadata, rawContext, importantFileResult.files);
+    const { analysis, providerUsed, providerAttempts } = await analyzeRepoWithFallbackProviders(
+      metadata,
+      rawContext,
+      importantFileResult.files,
+    );
 
-    return res.json(analysis);
+    return res.json({
+      ...analysis,
+      providerUsed,
+      providerAttempts,
+    });
   } catch (error) {
     req.log?.error?.({ err: error }, "Repo analysis failed");
     const message = error instanceof Error ? error.message : "Repo analysis failed.";
@@ -577,46 +1423,51 @@ router.post("/chat/message", async (req: any, res: any) => {
   try {
     const body = ChatMessageBody.parse(req.body);
     const repoContext = truncateText(body.repoContext, MAX_CHAT_CONTEXT);
+    const relevantContext = await fetchRelevantFileContext(body.repoName, body.message).catch(() => ({ context: "", loaded: [] as string[] }));
+    const combinedContext = [repoContext, relevantContext.context].filter(Boolean).join("\n\n");
+    const providerAttempts: ProviderAttempt[] = [];
 
-    let replyText = buildFallbackChatReply(body.repoName, repoContext, body.message);
+    let replyText = buildFallbackChatReply(body.repoName, combinedContext, body.message);
+    if (relevantContext.loaded.length) {
+      writeSse(res, { filesLoaded: relevantContext.loaded });
+    }
 
-    if (process.env.GEMINI_API_KEY) {
+    let streamed = false;
+    let providerUsed: AiProvider | "fallback" = "fallback";
+    for (const provider of getAvailableProviders()) {
       try {
-        const geminiReply = extractGeminiText(
-          await geminiGenerateContent(GEMINI_CHAT_MODEL, {
-            system_instruction: {
-              parts: [
-                {
-                  text: `You are an AI embedded in the ${body.repoName} repo. Detect the user's language from their message and reply ENTIRELY in that same language. You help users install, run, understand, and debug this codebase.\n\nRepository context:\n${repoContext}`,
-                },
-              ],
-            },
-            contents: [
-              ...body.history.map((entry) => ({
-                role: entry.role === "assistant" ? "model" : "user",
-                parts: [{ text: entry.content }],
-              })),
-              {
-                role: "user",
-                parts: [{ text: body.message }],
-              },
-            ],
-            generationConfig: {
-              temperature: 0.5,
-            },
-          }),
+        const providerReply = await streamChatWithProvider(
+          provider,
+          body,
+          combinedContext,
+          (chunk) => {
+            streamed = true;
+            writeSse(res, { content: chunk });
+          },
         );
-
-        if (geminiReply) {
-          replyText = geminiReply;
+        if (providerReply) {
+          providerAttempts.push({ provider, status: "success" });
+          providerUsed = provider;
+          writeSse(res, { providerUsed, providerAttempts });
+          replyText = providerReply;
+          break;
         }
       } catch (error) {
-        req.log?.warn?.({ err: error }, "Gemini chat unavailable, using repo-context fallback");
+        providerAttempts.push({
+          provider,
+          status: "failed",
+          error: error instanceof Error ? error.message.slice(0, 200) : "Unknown provider failure.",
+        });
+        req.log?.warn?.({ err: error, provider }, "Chat provider unavailable, trying next provider");
       }
     }
 
-    for (const chunk of chunkText(replyText)) {
-      writeSse(res, { content: chunk });
+    if (!streamed || replyText === buildFallbackChatReply(body.repoName, combinedContext, body.message)) {
+      providerUsed = "fallback";
+      writeSse(res, { providerUsed, providerAttempts });
+      for (const chunk of chunkText(replyText)) {
+        writeSse(res, { content: chunk });
+      }
     }
 
     writeSse(res, { done: true });
