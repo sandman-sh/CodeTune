@@ -100,6 +100,14 @@ export default function Home() {
 
   useEffect(() => { inputRef.current?.focus(); }, []);
   useEffect(() => { localStorage.setItem("ct-mode", mode); }, [mode]);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const repoFromQuery = params.get("repoUrl");
+    if (repoFromQuery) {
+      const normalized = normalizeGitHubUrl(repoFromQuery);
+      setRepoUrl(normalized);
+    }
+  }, []);
 
   const { mutate: generate, isPending, data, error, reset } = useGenerateSoundtrack();
   const { mutate: generate2, isPending: isPending2, data: data2, error: error2, reset: reset2 } = useGenerateSoundtrack();

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import {
   Bot,
   Bug,
@@ -26,6 +26,7 @@ export interface ChatQuickAction {
 interface ChatInterfaceProps {
   repoName: string;
   detectedLanguage: string;
+  headerAction?: ReactNode;
   filesLoaded?: string[];
   providerUsed?: string | null;
   messages: RepoChatMessage[];
@@ -57,6 +58,7 @@ const DEFAULT_QUICK_ACTIONS: ChatQuickAction[] = [
 export function ChatInterface({
   repoName,
   detectedLanguage,
+  headerAction,
   filesLoaded = [],
   providerUsed,
   messages,
@@ -134,6 +136,7 @@ export function ChatInterface({
           </div>
 
           <div className="flex items-center gap-2">
+            {headerAction ? <div className="flex">{headerAction}</div> : null}
             {providerUsed ? (
               <div className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                 {providerUsed}

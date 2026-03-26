@@ -197,6 +197,8 @@ export default function TalkToRepo() {
     }
   };
 
+  const musicHref = repoUrl ? `/music?repoUrl=${encodeURIComponent(normalizeGitHubUrl(repoUrl))}` : "/music";
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <motion.header
@@ -256,6 +258,14 @@ export default function TalkToRepo() {
             <ChatInterface
               repoName={analysis.repoName}
               detectedLanguage={detectedLanguage}
+              headerAction={
+                <Link href={musicHref}>
+                  <a className="inline-flex items-center gap-2 rounded-xl border border-foreground bg-foreground px-2.5 py-1.5 text-xs font-medium text-background transition-colors hover:bg-foreground/90 sm:px-3">
+                    <Music className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">Turn This Repo Into Music</span>
+                  </a>
+                </Link>
+              }
               filesLoaded={filesLoaded}
               providerUsed={providerUsed}
               messages={messages}

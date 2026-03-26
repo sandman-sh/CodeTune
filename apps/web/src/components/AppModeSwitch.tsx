@@ -13,7 +13,7 @@ export function AppModeSwitch() {
   return (
     <div className="inline-flex items-center gap-1 rounded-xl border border-border bg-card/80 p-1">
       {MODES.map(({ href, label, shortLabel, Icon }) => {
-        const active = location === href;
+        const active = href === "/talk" ? location === "/" || location === "/talk" : location === href;
 
         return (
           <Link key={href} href={href}>
