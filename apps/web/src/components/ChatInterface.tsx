@@ -122,7 +122,7 @@ export function ChatInterface({
   return (
     <section
       className={cn(
-        "flex h-[clamp(540px,72vh,820px)] flex-col overflow-hidden rounded-2xl border border-border bg-card",
+        "flex h-[clamp(590px,76vh,880px)] flex-col overflow-hidden rounded-2xl border border-border bg-card",
         className,
       )}
     >

@@ -1,31 +1,23 @@
 # CodeTune
 
-CodeTune turns a GitHub repository into an interactive AI experience.
+CodeTune is a voice-powered AI repo assistant.
 
-Paste a repo URL, analyze the codebase, talk to the repo in natural language, or turn the repository into a soundtrack that feels tied to the project itself.
+Paste a GitHub repo URL and CodeTune helps users understand the project, inspect its structure, debug issues, and hear repo-aware answers in voice. Using the same repository context, it can also generate music that reflects the codebase's structure, purpose, and engineering style.
 
 ## What It Does
 
-- Accepts any public GitHub repository URL
-- Scrapes repo context with Firecrawl
-- Reads repository metadata and code structure
-- Lets users choose between two product modes:
-  - `Talk to Repo`: analyze a codebase and chat with an AI guide that knows the repo
-  - `Code to Music`: generate a soundtrack from the repo's structure, purpose, and engineering style
-- Extracts code signals such as:
-  - primary language
-  - function count
-  - loop count
-  - nesting depth
-  - comment density
-  - overall code personality
-- Converts those signals into:
-  - repo summaries and code DNA
-  - music parameters
-  - repo-specific lyrics
-  - instrumental or lyrical generation prompts
+- Accepts a public GitHub repository URL as input
+- Analyzes repository context using Firecrawl, repository structure, and sampled source files
+- Starts in `Talk to Repo`, where users can:
+  - understand what a repository does
+  - inspect architecture, file structure, and important files
+  - ask how to run or debug the project
+  - explore issue-related context for debugging
+  - receive answers in both text and voice
+- Supports a direct handoff into `Code to Music` using the same repository context
+- Generates instrumental or lyrical tracks that are personalized to the repository
 - Stores soundtrack metadata in Supabase Postgres
-- Provides a soundtrack card for download/share
+- Provides playback, sharing, and download support for generated results
 
 ## Stack
 
@@ -34,9 +26,10 @@ Paste a repo URL, analyze the codebase, talk to the repo in natural language, or
 - Database: Postgres via Supabase
 - Validation: Zod
 - ORM: Drizzle
-- Repo analysis: Firecrawl + repository metadata + sampled source files
-- AI chat + analysis: Gemini
-- Audio provider: ElevenLabs
+- Repo analysis: Firecrawl + repository structure + sampled source files
+- AI routing for analysis and chat: OpenRouter -> DeepSeek -> Groq -> Gemini
+- Voice and music: ElevenLabs
+- Voice transcription: Gemini
 
 ## Monorepo Structure
 
@@ -54,7 +47,7 @@ packages/
 
 ## Features
 
-- Two product modes from one repo URL:
+- One repo URL powers two connected experiences:
   - `Talk to Repo`
   - `Code to Music`
 - Talk mode with:
@@ -62,12 +55,25 @@ packages/
   - AI chat over repo context
   - voice playback
   - voice input transcription
+  - file-aware answers
+  - issue-aware answers and debugging help
 - Music mode with:
   - instrumental and lyrical generation
-  - quick and full-length generation
+  - repo-specific lyrics
   - code-to-music mapping
   - soundtrack card export and sharing
+- Smooth handoff from Talk mode into Music mode with the same repo prefilled
 - Supabase-backed soundtrack caching
+
+## Why It Matters
+
+CodeTune is designed to make repository onboarding and exploration faster.
+
+It helps users:
+- understand an unfamiliar codebase faster
+- ask practical questions about setup, structure, and debugging
+- inspect issue context without manually digging through the repo
+- generate a soundtrack from the same repository context when a more expressive output is useful
 
 ## Requirements
 
@@ -77,6 +83,11 @@ packages/
 - Firecrawl API key
 - ElevenLabs API key
 - Gemini API key
+- At least one chat/analysis provider key:
+  - OpenRouter
+  - DeepSeek
+  - Groq
+  - or Gemini
 
 ## Environment Variables
 
@@ -93,6 +104,9 @@ DATABASE_URL=
 FIRECRAWL_API_KEY=
 ELEVENLABS_API_KEY=
 GEMINI_API_KEY=
+OPENROUTER_API_KEY=
+DEEPSEEK_API_KEY=
+GROQ_API_KEY=
 PORT=8080
 BASE_PATH=/
 VITE_API_ORIGIN=http://127.0.0.1:8080
@@ -101,7 +115,12 @@ VITE_API_ORIGIN=http://127.0.0.1:8080
 Notes:
 
 - Use the Supabase pooled connection string for `DATABASE_URL`
-- `GEMINI_API_KEY` powers repo analysis, chat, and transcription in Talk mode
+- `GEMINI_API_KEY` powers transcription and can also act as a fallback analysis/chat provider
+- Talk mode tries providers in this order:
+  - `OPENROUTER_API_KEY`
+  - `DEEPSEEK_API_KEY`
+  - `GROQ_API_KEY`
+  - `GEMINI_API_KEY`
 - `sound_generation` permission is required for instrumental audio
 - Eleven Music access is required for true sung lyrical generation
 
@@ -141,25 +160,41 @@ Default local URLs:
 - Web: `http://127.0.0.1:22772/`
 - API: `http://127.0.0.1:8080/`
 
-## Product Modes
+## Product Flow
 
-### Talk to Repo
+1. Paste a GitHub repo URL
+2. CodeTune analyzes the repository and starts in `Talk to Repo`
+3. Ask questions about:
+   - what the repo does
+   - architecture
+   - setup and run commands
+   - file structure
+   - issue counts, issue lists, and issue-specific debugging
+4. Hear the repo reply in voice as well as text
+5. Click `Turn This Repo Into Music`
+6. Generate instrumental or lyrical music from the same repository context
+7. Listen, view lyrics, and share the soundtrack
 
-Use Talk mode to:
+## Talk to Repo
 
-- analyze a repository
-- hear the repo introduce itself
-- ask follow-up questions about setup, architecture, debugging, and code structure
-- get summary, code DNA, and repo details directly inside the chat experience
+Talk mode is the main entry point.
 
-### Code to Music
+It is built for:
+- understanding unfamiliar repos quickly
+- explaining structure and important files
+- helping users run or debug a project
+- pulling issue context into the conversation when needed
+- acting like the repo itself has become a voice-powered guide
 
-Use Music mode to:
+## Code to Music
 
-- map repo structure and engineering traits into musical parameters
+Music mode is the payoff layer.
+
+It uses repo context to:
+- map engineering style into musical traits
+- build personalized lyrical prompts
 - generate instrumental or lyrical tracks
-- display lyrics, player controls, code DNA, and soundtrack card output
-- cache and revisit generated results
+- make the codebase feel memorable, not just understandable
 
 ## Build
 
@@ -188,6 +223,9 @@ For production, set these environment variables in Vercel:
 - `FIRECRAWL_API_KEY`
 - `ELEVENLABS_API_KEY`
 - `GEMINI_API_KEY`
+- `OPENROUTER_API_KEY`
+- `DEEPSEEK_API_KEY`
+- `GROQ_API_KEY`
 
 ## Current ElevenLabs Notes
 
@@ -199,20 +237,6 @@ That means:
 - Lyrical singing needs a key/workspace with Eleven Music access
 
 If those permissions are missing, the app will still run, but audio generation will fail with a clear backend message instead of returning fake lyrical output.
-
-## Product Flow
-
-1. User submits a GitHub repo URL
-2. Backend normalizes the URL and analyzes the repo with Firecrawl, metadata, and sampled files
-3. User chooses a mode:
-   - `Talk to Repo`
-   - `Code to Music`
-4. In Talk mode, Gemini generates repo-aware answers and voice features
-5. In Music mode, code metrics are mapped into musical traits
-6. Lyrics and/or prompts are generated from repo purpose and code structure
-7. Audio is generated through ElevenLabs
-8. Metadata is stored in Supabase
-9. Frontend renders chat, player, lyrics, Code DNA, and soundtrack card output depending on mode
 
 ## License
 

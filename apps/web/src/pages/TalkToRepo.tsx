@@ -336,7 +336,7 @@ export default function TalkToRepo() {
           </motion.div>
         ) : isAnalyzing ? (
           <div className="mt-8">
-            <div className="panel h-[clamp(540px,72vh,820px)] animate-pulse bg-card/70" />
+            <div className="panel h-[clamp(590px,76vh,880px)] animate-pulse bg-card/70" />
           </div>
         ) : null}
       </main>

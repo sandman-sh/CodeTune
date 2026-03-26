@@ -21,6 +21,7 @@ const MAX_RELEVANT_FILE_CHARS = 7000;
 const MAX_RELEVANT_FILES = 3;
 const MAX_STRUCTURE_CONTEXT_CHARS = 4500;
 const MAX_ARCHITECTURE_CONTEXT_CHARS = 6000;
+const MAX_ISSUE_CONTEXT_CHARS = 6000;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-001";
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -53,8 +54,28 @@ type RepoTreeItem = {
   size?: number;
 };
 
+type GitHubIssue = {
+  number: number;
+  title: string;
+  body?: string | null;
+  state?: string;
+  comments?: number;
+  html_url?: string;
+  labels?: Array<{ name?: string }>;
+  user?: { login?: string };
+  pull_request?: unknown;
+};
+
+type GitHubIssueComment = {
+  body?: string | null;
+  user?: { login?: string };
+};
+
 const repoTreeCache = new Map<string, RepoTreeItem[]>();
 const rawFileCache = new Map<string, string>();
+const issueCache = new Map<string, GitHubIssue | null>();
+const issueCommentCache = new Map<string, GitHubIssueComment[]>();
+const issueListCache = new Map<string, GitHubIssue[]>();
 
 type OpenAiLikeMessage = {
   role: "system" | "user" | "assistant";
@@ -563,6 +584,8 @@ function buildFallbackChatReply(repoName: string, repoContext: string, message: 
   const description = lines.find((line) => line.startsWith("Description:"))?.replace(/^Description:\s*/, "");
   const language = lines.find((line) => line.startsWith("Primary language:"))?.replace(/^Primary language:\s*/, "");
   const hasReadme = lines.some((line) => line.toLowerCase().includes("readme markdown"));
+  const issueCountLine = lines.find((line) => line.startsWith("Open issues count:"));
+  const listedIssueLines = lines.filter((line) => /^Issue #\d+:/.test(line));
 
   if (
     lowerMessage.includes("how many file") ||
@@ -605,6 +628,15 @@ function buildFallbackChatReply(repoName: string, repoContext: string, message: 
       structure.topLevelDirectories.length ? `Top-level folders: ${structure.topLevelDirectories.join(", ")}.` : "",
       structure.notableFiles.length ? `Notable files: ${structure.notableFiles.slice(0, 8).join(", ")}.` : "",
       hasReadme ? "The README looks like the best source of architecture notes." : "The scraped context is light, so inspect the entry files and README first.",
+    ].filter(Boolean).join(" ");
+  }
+
+  if (lowerMessage.includes("issue") || /#\d+/.test(lowerMessage)) {
+    return [
+      `${repoName} is answering from the repo context fallback.`,
+      issueCountLine || "I do not have the full issue list in the current fallback snapshot.",
+      listedIssueLines.length ? `Recent issues: ${listedIssueLines.slice(0, 3).join(" | ")}` : "",
+      "If you mention a specific issue number, I can use that as the main debugging context.",
     ].filter(Boolean).join(" ");
   }
 
@@ -680,6 +712,207 @@ async function fetchRepoTree(metadata: RepoMetadata): Promise<RepoTreeItem[]> {
   const tree = treeData?.tree || [];
   repoTreeCache.set(cacheKey, tree);
   return tree;
+}
+
+function extractIssueNumbers(message: string): number[] {
+  const matches = [
+    ...message.matchAll(/(?:^|\s)#(\d+)\b/g),
+    ...message.matchAll(/\bissue\s+#?(\d+)\b/gi),
+    ...message.matchAll(/\bbug\s+#?(\d+)\b/gi),
+  ];
+
+  return uniqueStrings(matches.map((match) => match[1] || ""))
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0)
+    .slice(0, 3);
+}
+
+function extractOrdinalIndex(message: string): number | null {
+  const match =
+    message.match(/\b(\d+)(?:st|nd|rd|th)\b/i) ||
+    message.match(/\b(first|second|third|fourth|fifth)\b/i);
+
+  if (!match) return null;
+  const token = (match[1] || "").toLowerCase();
+  if (/^\d+$/.test(token)) {
+    return Math.max(0, Number(token) - 1);
+  }
+
+  const ordinals: Record<string, number> = {
+    first: 0,
+    second: 1,
+    third: 2,
+    fourth: 3,
+    fifth: 4,
+  };
+  return ordinals[token] ?? null;
+}
+
+function extractRequestedIssueListCount(message: string): number {
+  const explicitCount = message.match(/\b(?:first|top|latest|recent)\s+(\d+)\s+issues?\b/i);
+  if (explicitCount) {
+    return Math.min(Math.max(Number(explicitCount[1]), 1), 10);
+  }
+
+  const wordCount = message.match(/\b(first|two|three|four|five)\s+issues?\b/i);
+  if (wordCount) {
+    const counts: Record<string, number> = { first: 1, two: 2, three: 3, four: 4, five: 5 };
+    return counts[wordCount[1].toLowerCase()] ?? 3;
+  }
+
+  return 3;
+}
+
+function isIssueQuestion(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("issue") ||
+    lower.includes("bug report") ||
+    lower.includes("open bug") ||
+    lower.includes("open issue") ||
+    lower.includes("issues list") ||
+    lower.includes("how many issue") ||
+    /#\d+/.test(lower)
+  );
+}
+
+async function fetchIssue(metadata: RepoMetadata, issueNumber: number): Promise<GitHubIssue | null> {
+  const cacheKey = `${metadata.repoName}#${issueNumber}`;
+  if (issueCache.has(cacheKey)) {
+    return issueCache.get(cacheKey) || null;
+  }
+
+  const issue = await fetchGitHubJson<GitHubIssue>(`/repos/${metadata.repoName}/issues/${issueNumber}`);
+  const normalized = issue && !issue.pull_request ? issue : null;
+  issueCache.set(cacheKey, normalized);
+  return normalized;
+}
+
+async function fetchIssueComments(metadata: RepoMetadata, issueNumber: number): Promise<GitHubIssueComment[]> {
+  const cacheKey = `${metadata.repoName}#${issueNumber}:comments`;
+  if (issueCommentCache.has(cacheKey)) {
+    return issueCommentCache.get(cacheKey) || [];
+  }
+
+  const comments = await fetchGitHubJson<GitHubIssueComment[]>(
+    `/repos/${metadata.repoName}/issues/${issueNumber}/comments?per_page=5`,
+  );
+  const normalized = Array.isArray(comments) ? comments : [];
+  issueCommentCache.set(cacheKey, normalized);
+  return normalized;
+}
+
+async function searchIssues(
+  metadata: RepoMetadata,
+  query: string,
+  perPage: number,
+): Promise<{ totalCount: number; items: GitHubIssue[] }> {
+  const cacheKey = `${metadata.repoName}:search:${query}:${perPage}`;
+  const cached = issueListCache.get(cacheKey);
+  if (cached) {
+    return { totalCount: cached.length, items: cached };
+  }
+
+  const encoded = encodeURIComponent(`repo:${metadata.repoName} is:issue ${query}`.trim());
+  const result = await fetchGitHubJson<{ total_count?: number; items?: GitHubIssue[] }>(
+    `/search/issues?q=${encoded}&sort=updated&order=desc&per_page=${perPage}`,
+  );
+  const items = (result?.items || []).filter((issue) => !issue.pull_request);
+  issueListCache.set(cacheKey, items);
+  return {
+    totalCount: typeof result?.total_count === "number" ? result.total_count : items.length,
+    items,
+  };
+}
+
+function buildIssueListSummary(issues: GitHubIssue[]): string {
+  return issues
+    .map((issue, index) => `${index + 1}. Issue #${issue.number}: ${issue.title}`)
+    .join("\n");
+}
+
+async function buildIssueContext(message: string, metadata: RepoMetadata): Promise<{ context: string; loaded: string[] }> {
+  if (!isIssueQuestion(message)) {
+    return { context: "", loaded: [] };
+  }
+
+  const lower = message.toLowerCase();
+  const explicitIssueNumbers = extractIssueNumbers(message);
+  const ordinalIndex = extractOrdinalIndex(message);
+  const wantsCount = lower.includes("how many issue") || lower.includes("number of issue") || lower.includes("issue count");
+  const wantsList =
+    /\b(list|show|tell me|give me)\b/i.test(message) && /\bissues?\b/i.test(message) ||
+    /\bfirst\b.*\bissues?\b/i.test(message) ||
+    /\blatest\b.*\bissues?\b/i.test(message) ||
+    /\brecent\b.*\bissues?\b/i.test(message);
+  const wantsSpecificIssue =
+    explicitIssueNumbers.length > 0 ||
+    (ordinalIndex !== null && /\b(issue|issues?)\b/i.test(message) && /\b(open|tell|show|explain|fix|debug)\b/i.test(message));
+
+  const openIssuesResult = wantsCount || wantsList || wantsSpecificIssue
+    ? await searchIssues(metadata, "state:open", Math.max(extractRequestedIssueListCount(message), 5))
+    : { totalCount: 0, items: [] as GitHubIssue[] };
+
+  const issuesToLoad: GitHubIssue[] = [];
+
+  if (explicitIssueNumbers.length) {
+    for (const issueNumber of explicitIssueNumbers) {
+      const issue = await fetchIssue(metadata, issueNumber);
+      if (issue) issuesToLoad.push(issue);
+    }
+  } else if (ordinalIndex !== null && openIssuesResult.items[ordinalIndex]) {
+    issuesToLoad.push(openIssuesResult.items[ordinalIndex]);
+  }
+
+  const listCount = extractRequestedIssueListCount(message);
+  const listedIssues = wantsList ? openIssuesResult.items.slice(0, listCount) : [];
+  const issueBlocks = await Promise.all(
+    issuesToLoad.map(async (issue) => {
+      const comments = await fetchIssueComments(metadata, issue.number);
+      const commentText = comments
+        .slice(0, 3)
+        .map((comment, index) => {
+          const author = comment.user?.login || `commenter-${index + 1}`;
+          const body = truncateText((comment.body || "").trim(), 700);
+          return body ? `Comment by ${author}:\n${body}` : "";
+        })
+        .filter(Boolean)
+        .join("\n\n");
+
+      return [
+        `Issue #${issue.number}: ${issue.title}`,
+        `State: ${issue.state || "open"}`,
+        issue.labels?.length ? `Labels: ${issue.labels.map((label) => label.name).filter(Boolean).join(", ")}` : "",
+        issue.body ? `Issue body:\n${truncateText(issue.body.trim(), 1800)}` : "Issue body: No description provided.",
+        commentText ? `Comments:\n${commentText}` : "",
+        issue.html_url ? `URL: ${issue.html_url}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+    }),
+  );
+
+  const summaryLines = [
+    wantsCount ? `Open issues count: ${openIssuesResult.totalCount}` : "",
+    listedIssues.length ? `Open issue list:\n${buildIssueListSummary(listedIssues)}` : "",
+  ].filter(Boolean);
+
+  return {
+    context: truncateText(
+      [
+        summaryLines.join("\n\n"),
+        issueBlocks.length ? `Loaded issue details:\n\n${issueBlocks.join("\n\n---\n\n")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      MAX_ISSUE_CONTEXT_CHARS,
+    ),
+    loaded: uniqueStrings([
+      wantsCount ? `open issues: ${openIssuesResult.totalCount}` : "",
+      ...listedIssues.map((issue, index) => `${index + 1}. issue #${issue.number}`),
+      ...issuesToLoad.map((issue) => `issue #${issue.number}`),
+    ]),
+  };
 }
 
 async function scrapeMarkdown(url: string): Promise<string> {
@@ -1056,6 +1289,7 @@ async function fetchRelevantFileContext(repoName: string, message: string): Prom
   const tree = await fetchRepoTree(metadata);
   const structureContext = buildLiveStructureContext(message, tree);
   const architectureContext = buildArchitectureContext(message, tree);
+  const issueContext = await buildIssueContext(message, metadata).catch(() => ({ context: "", loaded: [] as string[] }));
   const selectedFiles = uniqueStrings([
     ...selectRelevantFiles(message, tree),
     ...(isArchitectureQuestion(message) ? selectArchitectureFiles(tree) : []),
@@ -1063,8 +1297,8 @@ async function fetchRelevantFileContext(repoName: string, message: string): Prom
 
   if (!selectedFiles.length) {
     return {
-      context: [architectureContext.context, structureContext.context].filter(Boolean).join("\n\n"),
-      loaded: uniqueStrings([...architectureContext.loaded, ...structureContext.loaded]),
+      context: [issueContext.context, architectureContext.context, structureContext.context].filter(Boolean).join("\n\n"),
+      loaded: uniqueStrings([...issueContext.loaded, ...architectureContext.loaded, ...structureContext.loaded]),
     };
   }
 
@@ -1080,14 +1314,14 @@ async function fetchRelevantFileContext(repoName: string, message: string): Prom
   );
 
   const combined = fileChunks.filter(Boolean).join("\n\n");
-  const contextParts = [architectureContext.context, structureContext.context];
+  const contextParts = [issueContext.context, architectureContext.context, structureContext.context];
   if (combined.trim()) {
     contextParts.push(truncateText(`Relevant raw file context:\n${combined}`, MAX_RELEVANT_FILE_CHARS));
   }
 
   return {
     context: contextParts.filter(Boolean).join("\n\n"),
-    loaded: uniqueStrings([...architectureContext.loaded, ...structureContext.loaded, ...selectedFiles]),
+    loaded: uniqueStrings([...issueContext.loaded, ...architectureContext.loaded, ...structureContext.loaded, ...selectedFiles]),
   };
 }
 
