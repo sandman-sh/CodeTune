@@ -19,8 +19,8 @@ type FetchResponseLike = {
 
 // Disk-based audio cache — persists across server restarts
 const AUDIO_DIR = path.join(os.tmpdir(), "codetune-audio");
-const INSTRUMENTAL_AUDIO_PIPELINE_VERSION = "instrumental-v1";
-const LYRICAL_AUDIO_PIPELINE_VERSION = "lyrical-v3";
+const INSTRUMENTAL_AUDIO_PIPELINE_VERSION = "instrumental-v2";
+const LYRICAL_AUDIO_PIPELINE_VERSION = "lyrical-v5";
 
 async function ensureAudioDir() {
   await fs.mkdir(AUDIO_DIR, { recursive: true });
@@ -138,6 +138,14 @@ function extractTechWords(context: string): string[] {
   return keywords.filter((k) => lower.includes(k)).slice(0, 6);
 }
 
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function normalizePath(pathValue: string): string {
+  return pathValue.replace(/^\.?\//, "");
+}
+
 // ── GitHub API Stats ────────────────────────────────────────────────────────
 
 interface GitHubStats {
@@ -151,6 +159,114 @@ interface GitHubStats {
   watchersCount: number;
   hasWiki: boolean;
   defaultBranch: string;
+}
+
+interface RepoTreeItem {
+  path: string;
+  type: "blob" | "tree";
+  size?: number;
+}
+
+async function fetchGitHubJson<T>(pathValue: string): Promise<T | null> {
+  try {
+    const responseRaw = await fetch(`https://api.github.com${pathValue}`, {
+      headers: {
+        "User-Agent": "CodeTune/1.0",
+        "Accept": "application/vnd.github.v3+json",
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    const response = responseRaw as FetchResponseLike;
+    if (!response.ok) return null;
+    return (await response.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRepoTree(repoName: string, defaultBranch: string): Promise<RepoTreeItem[]> {
+  const treeData = await fetchGitHubJson<{ tree?: RepoTreeItem[] }>(
+    `/repos/${repoName}/git/trees/${defaultBranch}?recursive=1`,
+  );
+
+  return treeData?.tree || [];
+}
+
+function buildRepoTreeSummary(tree: RepoTreeItem[]): string {
+  const blobPaths = tree
+    .filter((item) => item.type === "blob")
+    .map((item) => normalizePath(item.path));
+  const directories = uniqueStrings(
+    blobPaths
+      .map((filePath) => filePath.split("/").slice(0, -1).join("/"))
+      .filter(Boolean),
+  );
+  const topLevelDirectories = directories.filter((directory) => !directory.includes("/")).slice(0, 10);
+  const notableFiles = pickMusicContextFiles(tree).slice(0, 10);
+
+  return [
+    topLevelDirectories.length ? `Top-level directories: ${topLevelDirectories.join(", ")}` : "",
+    notableFiles.length ? `Notable files: ${notableFiles.join(", ")}` : "",
+    `Repository file count: ${blobPaths.length}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function pickMusicContextFiles(tree: RepoTreeItem[]): string[] {
+  const candidateFiles = tree.filter((item) => item.type === "blob" && !item.path.includes("node_modules"));
+  const sourceFilePattern = /\.(ts|tsx|js|jsx|py|rs|go|java|rb|php|cs|json|toml|ya?ml|md|sh|html|css|scss)$/i;
+
+  return uniqueStrings(
+    candidateFiles
+      .filter((item) => sourceFilePattern.test(item.path))
+      .map((item) => {
+        const filePath = normalizePath(item.path);
+        const lower = filePath.toLowerCase();
+        let score = 0;
+
+        if (/^readme/i.test(lower)) score += 160;
+        if (/^architecture\.md$/.test(lower) || /(^|\/)architecture\.md$/.test(lower)) score += 150;
+        if (/^package\.json$/.test(lower) || /^pnpm-workspace\.yaml$/.test(lower)) score += 130;
+        if (/^requirements\.txt$/.test(lower) || /^pyproject\.toml$/.test(lower) || /^cargo\.toml$/.test(lower) || /^go\.mod$/.test(lower)) score += 120;
+        if (/^taskfile\.ya?ml$/.test(lower) || /^makefile$/.test(lower) || /^dockerfile$/.test(lower) || /^docker-compose/.test(lower)) score += 110;
+        if (/^src\/(main|index|app|server|router)\./.test(lower) || /^app\/page\./.test(lower) || /^main\./.test(lower)) score += 120;
+        if (/^(src|app|server|api|routes|components|pages|lib|cmd|internal|pkg|webapp|templates)\//.test(lower)) score += 45;
+        if (/config|settings|schema|middleware|controller|service/.test(lower)) score += 28;
+        if (/test|spec|fixture|mock/.test(lower)) score -= 24;
+        score -= Math.min((filePath.match(/\//g) || []).length * 2, 10);
+
+        return { path: filePath, score };
+      })
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.path),
+  ).slice(0, 8);
+}
+
+async function fetchImportantFileSamples(
+  repoName: string,
+  defaultBranch: string,
+  tree: RepoTreeItem[],
+): Promise<Array<{ path: string; content: string }>> {
+  const selectedPaths = pickMusicContextFiles(tree);
+  const files = await Promise.all(
+    selectedPaths.map(async (filePath) => {
+      try {
+        const responseRaw = await fetch(
+          `https://raw.githubusercontent.com/${repoName}/${defaultBranch}/${filePath}`,
+          { signal: AbortSignal.timeout(12000) },
+        );
+        const response = responseRaw as FetchResponseLike;
+        if (!response.ok) return null;
+        const content = (await response.text()).trim();
+        return content ? { path: filePath, content: content.slice(0, 2200) } : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  return files.filter((file): file is { path: string; content: string } => Boolean(file));
 }
 
 async function fetchGitHubStats(repoName: string): Promise<GitHubStats> {
@@ -446,10 +562,14 @@ async function scrapeRepoContext(repoUrl: string, repoName: string): Promise<str
 
   const firecrawl = new FirecrawlApp({ apiKey });
 
-  // Scrape 3 pages in parallel: main repo, code search for functions, code search for loops
   const [owner, repo] = repoName.split("/");
+  const repoMeta = await fetchGitHubJson<{ default_branch?: string | null }>(`/repos/${repoName}`);
+  const defaultBranch = repoMeta?.default_branch || "main";
   const scrapeTargets = [
     repoUrl,
+    `${repoUrl}/blob/${defaultBranch}/README.md`,
+    `${repoUrl}/blob/main/README.md`,
+    `${repoUrl}/blob/master/README.md`,
     `https://github.com/${owner}/${repo}/search?q=function+class+loop&type=code`,
   ];
 
@@ -463,20 +583,89 @@ async function scrapeRepoContext(repoUrl: string, repoName: string): Promise<str
     )
   );
 
-  const chunks: string[] = [];
+  const scrapedChunks: string[] = [];
   for (const r of results) {
     if (r.status === "fulfilled" && r.value?.success) {
       const content: string = r.value.markdown || r.value.content || "";
-      if (content.length > 100) chunks.push(content.slice(0, 3000));
+      if (content.length > 100) scrapedChunks.push(content.slice(0, 3200));
     }
   }
 
-  return chunks.join("\n\n---\n\n").slice(0, 8000);
+  const tree = await fetchRepoTree(repoName, defaultBranch);
+  const treeSummary = buildRepoTreeSummary(tree);
+  const fileSamples = await fetchImportantFileSamples(repoName, defaultBranch, tree);
+  const codeSampleBlock = fileSamples.length
+    ? fileSamples
+        .map((file) => `File: ${file.path}\n${file.content}`)
+        .join("\n\n")
+    : "";
+
+  return [
+    `Repository: ${repoName}`,
+    treeSummary ? `Repository structure:\n${treeSummary}` : "",
+    scrapedChunks.length ? scrapedChunks.join("\n\n---\n\n") : "",
+    codeSampleBlock ? `Important code samples:\n${codeSampleBlock}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 12000);
 }
 
 // ── Lyrics generation ──────────────────────────────────────────────────────
 
-const LYRIC_CONTEXT_NOISE_PATTERN = /skip to content|sign in|sign up|github|navigation menu|search code|open more actions menu|reload to refresh|dismiss alert|switched accounts/i;
+const LYRIC_CONTEXT_NOISE_PATTERN = /skip to content|sign in|sign up|github|navigation menu|search code|open more actions menu|reload to refresh|dismiss alert|switched accounts|download raw file|copy path|history|blame/i;
+
+function extractRepoSpecificPhrases(context: string): string[] {
+  const lines = context
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 8);
+
+  const description = lines.find((line) => /^description:/i.test(line));
+  const topics = lines.find((line) => /^topics:/i.test(line));
+  const directories = lines.find((line) => /^top-level directories:/i.test(line));
+  const notableFiles = lines.find((line) => /^notable files:/i.test(line));
+  const fileCount = lines.find((line) => /^repository file count:/i.test(line));
+  const commands = lines.filter((line) => /\b(task|npm|pnpm|yarn|python|pip|docker|gunicorn|flask)\b/i.test(line)).slice(0, 2);
+  const productLines = lines.filter((line) => /\b(bot|download|deploy|website|api|server|dashboard|cli|agent|music|voice)\b/i.test(line)).slice(0, 3);
+
+  const phrases = [
+    description ? description.replace(/^description:\s*/i, "") : "",
+    ...productLines,
+    ...commands,
+    topics ? `Themes around ${topics.replace(/^topics:\s*/i, "").split(",").slice(0, 3).join(", ")}` : "",
+    directories
+      ? `Folders like ${directories.replace(/^top-level directories:\s*/i, "").split(",").slice(0, 3).join(", ")} shape the flow`
+      : "",
+    notableFiles
+      ? `${notableFiles
+          .replace(/^notable files:\s*/i, "")
+          .split(",")
+          .slice(0, 3)
+          .join(", ")} hold the heartbeat of the build`
+      : "",
+    fileCount
+      ? (() => {
+          const count = Number(fileCount.replace(/^repository file count:\s*/i, "").trim());
+          if (!Number.isFinite(count)) return "";
+          if (count <= 12) return `${count} files only, lean and focused`;
+          if (count <= 150) return `${count} files weaving one focused design`;
+          return `${count} files moving like a living system`;
+        })()
+      : "",
+  ];
+
+  return uniqueStrings(
+    phrases.map((line) =>
+      line
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/[#*`]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80),
+    ),
+  ).filter(Boolean).slice(0, 8);
+}
 
 function generatePersonalizedLyrics(
   repo: string,
@@ -495,15 +684,22 @@ function generatePersonalizedLyrics(
   const detailHint = keyPhrases.length > 1
     ? keyPhrases[1].replace(/[#*`]/g, "").trim().slice(0, 50)
     : `${owner} shaped ${repoLabel} with ${techLine}`;
+  const motionHint = keyPhrases.length > 2
+    ? keyPhrases[2].replace(/[#*`]/g, "").trim().slice(0, 52)
+    : `${repoLabel} keeps the whole system moving`;
+  const runHint = keyPhrases.find((line) => /\b(task|npm|pnpm|yarn|python|pip|docker|gunicorn|flask)\b/i.test(line))
+    ?.replace(/[#*`]/g, "")
+    .trim()
+    .slice(0, 52) || `${techLine.split(",")[0] || "the stack"} keeps the runtime alive`;
 
   const lyrics: Record<string, string> = {
     rap: `[Verse 1]
 ${repoLabel} on the screen and the signal feels strong
 ${contextHint}
 ${techLine} — that's the stack we running here
-${techLine} in the mix, now the whole stack belongs
 ${detailHint}
-Merge to main, no fear
+${motionHint}
+${runHint}
 
 [Chorus]
 ${repo}, ${repo}, this codebase got range
@@ -512,10 +708,10 @@ From the terminal to prod, we never stop the grind
 This repo hits different — one of a kind
 
 [Verse 2]
-Stack traces in the morning, deploys at midnight
-Reviews coming back clean, everything looking tight
+${contextHint}
+${detailHint}
+${runHint}
 ${techLine.split(",")[0] || "The stack"} running smooth, no incidents in sight
-Open source and thriving, the community is right
 
 [Chorus]
 ${repo}, ${repo}, this codebase got range
@@ -531,7 +727,7 @@ Built different, built right`,
 ${repoLabel} glows beneath the screen light
 ${contextHint}
 ${owner}'s vision settles softly in the build tonight
-${techLine} — the stars align
+${runHint}
 
 [Chorus]
 Drift away with the code tonight
@@ -540,9 +736,9 @@ Lo-fi beats and terminal dreams
 Nothing is ever quite what it seems
 
 [Verse 2]
-${contextHint}
+${detailHint}
 Pull request pending, soft keys play
-${techLine.split(",")[0] || "Clean code"} flowing through the haze
+${motionHint}
 One more function, then I'll close my eyes
 
 [Chorus]
@@ -570,9 +766,9 @@ Every function, every class, every line
 This codebase was built to stand the test of time
 
 [Verse 2]
-${contextHint}
+${detailHint}
 The pull requests merge, the battles are won
-${techLine.split(",")[0] || "The foundation"} holding firm beneath the sun
+${motionHint}
 From zero to production — the legend's begun
 
 [Chorus]
@@ -591,7 +787,7 @@ Ready for what's next`,
 ${repoLabel} landed softly in the middle of the day
 ${repo} — it felt like a brand new tune
 ${owner} left the feeling tucked inside the frame
-${techLine.split(",")[0] || "silence"} carries it away
+${contextHint}
 
 [Chorus]
 But it's got a soundtrack now
@@ -601,10 +797,9 @@ They're forming something real
 This codebase plays aloud
 
 [Verse 2]
-${contextHint}
-The issues tab is full of half-formed dreams
-The commits tell a story, nothing's what it seems
-Star count rising like a quiet melody
+${detailHint}
+${motionHint}
+${runHint}
 This codebase resonates with me
 
 [Chorus]
@@ -634,11 +829,12 @@ async function generateLyrics(
   const [owner, repo] = repoName.split("/");
   const tech = extractTechWords(context);
   const noisyLinePattern = LYRIC_CONTEXT_NOISE_PATTERN;
+  const repoSpecificPhrases = extractRepoSpecificPhrases(context);
   const lines = context
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 20 && !noisyLinePattern.test(l))
-    .slice(0, 8)
+    .slice(0, 10)
     .map((l) =>
       l
         .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
@@ -647,6 +843,8 @@ async function generateLyrics(
         .slice(0, 60),
     )
     .filter(Boolean);
+
+  lines.unshift(...repoSpecificPhrases);
 
   // Enrich tech with real GitHub language data
   if (github?.primaryLanguage && github.primaryLanguage !== "Unknown") {
@@ -674,6 +872,17 @@ async function generateLyrics(
   }
 
   return generatePersonalizedLyrics(repo || repoName, owner || "dev", genre, tech, lines, metrics, github);
+}
+
+function lyricsNeedRefresh(lyrics: string | null): boolean {
+  if (!lyrics) return true;
+  const lower = lyrics.toLowerCase();
+  return (
+    lower.includes("notable files:") ||
+    lower.includes("repository file count:") ||
+    lower.includes("top-level directories:") ||
+    lower.includes("merge to main, no fear")
+  );
 }
 
 // ── ElevenLabs Sound Generation — real music from code metrics ──────────────
@@ -1007,16 +1216,24 @@ router.post("/generate", async (req: any, res: any) => {
       const cached = existing[0];
       const expectedAudioUrl = buildAudioUrl(cached.id, cached.mode);
       const requiresPipelineRefresh = !hasCurrentAudioPipeline(cached.audioUrl, cached.mode);
+      const requiresLyricRefresh = cached.mode === "lyrical" && lyricsNeedRefresh(cached.lyrics);
+      const shouldRefreshCachedTrack = requiresPipelineRefresh || requiresLyricRefresh;
       req.log.info({ id: cached.id }, "Found cached soundtrack in DB");
       let cachedAudioError: string | null = null;
+      let cachedLyrics = cached.lyrics;
+      let cachedMusicParams = cached.musicParams ? JSON.parse(cached.musicParams) : null;
+      let cachedCodeMetrics = cached.codeMetrics ? JSON.parse(cached.codeMetrics) : null;
 
-      if (requiresPipelineRefresh) {
+      if (shouldRefreshCachedTrack) {
         audioCache.delete(cached.id);
-        req.log.info({ id: cached.id, mode: cached.mode }, "Cached soundtrack uses an older audio pipeline, refreshing");
+        req.log.info(
+          { id: cached.id, mode: cached.mode, requiresPipelineRefresh, requiresLyricRefresh },
+          "Cached soundtrack needs regeneration",
+        );
       }
 
       // Try memory cache first (fastest)
-      if (!audioCache.has(cached.id)) {
+      if (!audioCache.has(cached.id) && !shouldRefreshCachedTrack) {
         // Try disk cache (persists across restarts)
         const diskAudio = await readAudioFromDisk(diskKey);
         if (diskAudio) {
@@ -1072,6 +1289,69 @@ router.post("/generate", async (req: any, res: any) => {
         }
       }
 
+      if (shouldRefreshCachedTrack) {
+        req.log.info({ id: cached.id }, "Regenerating cached soundtrack from latest repo context");
+        try {
+          let context = `Repository: ${cached.repoName}`;
+          let github: GitHubStats = {
+            stars: 0, forks: 0, sizeKb: 0, primaryLanguage: "Unknown",
+            languages: {}, openIssues: 0, topics: [], watchersCount: 0,
+            hasWiki: false, defaultBranch: "main",
+          };
+          const [ctxRes, ghRes] = await Promise.allSettled([
+            scrapeRepoContext(cached.repoUrl, cached.repoName),
+            fetchGitHubStats(cached.repoName),
+          ]);
+          if (ctxRes.status === "fulfilled" && ctxRes.value.length > 100) context = ctxRes.value;
+          if (ghRes.status === "fulfilled") github = ghRes.value;
+
+          const metrics = analyzeCodePatterns(context);
+          const musicParams = codeMetricsToMusicParams(metrics, github, cached.genre);
+          const cachedMode = (cached.mode || "instrumental") as "lyrical" | "instrumental";
+          const duration = Math.min(cached.duration || 22, 22);
+
+          if (cachedMode === "lyrical") {
+            cachedLyrics = await generateLyrics(cached.repoName, cached.genre, context, metrics, github);
+          }
+
+          const newAudio = await generateAudioTrack(
+            cachedMode,
+            cached.repoName,
+            cached.genre,
+            musicParams,
+            duration,
+            cachedLyrics,
+          );
+          audioCache.set(cached.id, newAudio);
+          await writeAudioToDisk(diskKey, newAudio);
+          cachedMusicParams = musicParams;
+          cachedCodeMetrics = {
+            functionCount: metrics.functionCount,
+            classCount: metrics.classCount,
+            loopCount: metrics.loopCount,
+            asyncCount: metrics.asyncCount,
+            errorHandlingCount: metrics.errorHandlingCount,
+            totalLines: metrics.totalLines,
+            nestingDepth: metrics.nestingDepth,
+            stars: github?.stars ?? 0,
+            forks: github?.forks ?? 0,
+            primaryLanguage: github?.primaryLanguage ?? "Unknown",
+            sizeKb: github?.sizeKb ?? 0,
+          };
+          await db.update(soundtracksTable)
+            .set({
+              audioUrl: expectedAudioUrl,
+              lyrics: cachedLyrics,
+              musicParams: JSON.stringify(cachedMusicParams),
+              codeMetrics: JSON.stringify(cachedCodeMetrics),
+            })
+            .where(eq(soundtracksTable.id, cached.id));
+        } catch (err) {
+          cachedAudioError = buildAudioErrorMessage(err);
+          req.log.warn({ err }, "Cached soundtrack regeneration failed");
+        }
+      }
+
       const hasAudio = audioCache.has(cached.id);
       res.json({
         id: String(cached.id),
@@ -1080,13 +1360,13 @@ router.post("/generate", async (req: any, res: any) => {
         mode: cached.mode,
         genre: cached.genre,
         generationType: cached.generationType,
-        lyrics: cached.lyrics,
+        lyrics: cachedLyrics,
         audioUrl: hasAudio ? expectedAudioUrl : null,
         duration: cached.duration,
         createdAt: cached.createdAt.toISOString(),
         cached: true,
-        musicParams: cached.musicParams ? JSON.parse(cached.musicParams) : null,
-        codeMetrics: cached.codeMetrics ? JSON.parse(cached.codeMetrics) : null,
+        musicParams: cachedMusicParams,
+        codeMetrics: cachedCodeMetrics,
         audioError: hasAudio ? null : cachedAudioError,
       });
       return;
