@@ -66,7 +66,9 @@ export default function TalkToRepo() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const voiceIntroKeyRef = useRef<string>("");
+  const voiceIntroPendingKeyRef = useRef<string>("");
   const lastSpokenMessageIdRef = useRef<string>("");
+  const lastSpokenPendingMessageIdRef = useRef<string>("");
 
   const {
     isRecording,
@@ -96,15 +98,26 @@ export default function TalkToRepo() {
   useEffect(() => {
     if (!analysis?.voiceIntro) return;
     if (voiceIntroKeyRef.current === analysis.repoName) return;
+    if (voiceIntroPendingKeyRef.current === analysis.repoName) return;
 
-    voiceIntroKeyRef.current = analysis.repoName;
+    voiceIntroPendingKeyRef.current = analysis.repoName;
     const timer = window.setTimeout(() => {
-      playVoice(analysis.voiceIntro).catch(() => {
-        toast({
-          title: "Voice intro unavailable",
-          description: "The repo summary loaded, but voice playback could not start.",
+      playVoice(analysis.voiceIntro)
+        .then(() => {
+          if (voiceIntroPendingKeyRef.current === analysis.repoName) {
+            voiceIntroPendingKeyRef.current = "";
+          }
+          voiceIntroKeyRef.current = analysis.repoName;
+        })
+        .catch(() => {
+          if (voiceIntroPendingKeyRef.current === analysis.repoName) {
+            voiceIntroPendingKeyRef.current = "";
+          }
+          toast({
+            title: "Voice intro unavailable",
+            description: "The repo summary loaded, but voice playback could not start.",
+          });
         });
-      });
     }, 800);
 
     return () => window.clearTimeout(timer);
@@ -119,15 +132,26 @@ export default function TalkToRepo() {
 
     if (!latestAssistantMessage) return;
     if (lastSpokenMessageIdRef.current === latestAssistantMessage.id) return;
+    if (lastSpokenPendingMessageIdRef.current === latestAssistantMessage.id) return;
 
-    lastSpokenMessageIdRef.current = latestAssistantMessage.id;
+    lastSpokenPendingMessageIdRef.current = latestAssistantMessage.id;
     const timer = window.setTimeout(() => {
-      playVoice(latestAssistantMessage.content).catch(() => {
-        toast({
-          title: "Voice playback unavailable",
-          description: "The latest repo reply was shown in text, but voice playback could not start.",
+      playVoice(latestAssistantMessage.content)
+        .then(() => {
+          if (lastSpokenPendingMessageIdRef.current === latestAssistantMessage.id) {
+            lastSpokenPendingMessageIdRef.current = "";
+          }
+          lastSpokenMessageIdRef.current = latestAssistantMessage.id;
+        })
+        .catch(() => {
+          if (lastSpokenPendingMessageIdRef.current === latestAssistantMessage.id) {
+            lastSpokenPendingMessageIdRef.current = "";
+          }
+          toast({
+            title: "Voice playback unavailable",
+            description: "The latest repo reply was shown in text, but voice playback could not start.",
+          });
         });
-      });
     }, 300);
 
     return () => window.clearTimeout(timer);
@@ -150,6 +174,9 @@ export default function TalkToRepo() {
       const nextAnalysis = await analyzeRepo(normalized);
       setAnalysis(nextAnalysis);
       lastSpokenMessageIdRef.current = "";
+      lastSpokenPendingMessageIdRef.current = "";
+      voiceIntroKeyRef.current = "";
+      voiceIntroPendingKeyRef.current = "";
       reset();
     } catch (analyzeError) {
       const message = analyzeError instanceof Error ? analyzeError.message : "Repo analysis failed.";

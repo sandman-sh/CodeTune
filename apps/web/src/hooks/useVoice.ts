@@ -39,6 +39,10 @@ function getSpeechRecognitionCtor() {
   return browserWindow.SpeechRecognition || browserWindow.webkitSpeechRecognition || null;
 }
 
+function canUseSpeechSynthesis() {
+  return typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
+}
+
 export function useVoice() {
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -57,6 +61,9 @@ export function useVoice() {
   } | null>(null);
 
   const stopPlayback = useCallback(() => {
+    if (canUseSpeechSynthesis()) {
+      window.speechSynthesis.cancel();
+    }
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
@@ -90,13 +97,37 @@ export function useVoice() {
     setIsSynthesizing(true);
 
     try {
-      const { audioBase64, mimeType } = await synthesizeVoice(text);
-      const audio = new Audio(toDataUrl(audioBase64, mimeType));
-      audioRef.current = audio;
-      audio.addEventListener("ended", () => setIsPlaying(false), { once: true });
-      audio.addEventListener("pause", () => setIsPlaying(false), { once: true });
-      await audio.play();
-      setIsPlaying(true);
+      try {
+        const { audioBase64, mimeType } = await synthesizeVoice(text);
+        const audio = new Audio(toDataUrl(audioBase64, mimeType));
+        audioRef.current = audio;
+        audio.addEventListener("ended", () => setIsPlaying(false), { once: true });
+        audio.addEventListener("pause", () => setIsPlaying(false), { once: true });
+        await audio.play();
+        setIsPlaying(true);
+        return;
+      } catch (voiceError) {
+        if (!canUseSpeechSynthesis()) {
+          throw voiceError;
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = typeof navigator !== "undefined" && navigator.language ? navigator.language : "en-US";
+          utterance.rate = 1;
+          utterance.onend = () => {
+            setIsPlaying(false);
+            resolve();
+          };
+          utterance.onerror = () => {
+            setIsPlaying(false);
+            reject(voiceError);
+          };
+          setIsPlaying(true);
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utterance);
+        });
+      }
     } finally {
       setIsSynthesizing(false);
     }
